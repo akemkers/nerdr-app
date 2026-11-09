@@ -10,4 +10,4 @@ A native desktop app for terminals and coding agents, written in Rust with GPUI.
 
 ## Status
 
-Spike: one GPUI window that attaches one hc terminal and renders it. See docs/spike.md once written.
+Spike done (one GPUI window, one hc terminal), plus the connection layer (`hc::Client`: many streams on one socket, events, reconnect). See docs/spike.md.

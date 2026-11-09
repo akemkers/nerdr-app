@@ -14,9 +14,10 @@ use anyhow::{Context as _, Result};
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, WindowBounds, WindowOptions, px, size,
 };
+use futures::StreamExt;
 use serde_json::{Value, json};
 
-use crate::view::{Attached, Metrics, TerminalView};
+use crate::view::{Metrics, TerminalView};
 
 const FONTS: [&[u8]; 4] = [
     include_bytes!("../fonts/JetBrainsMono-Regular.ttf"),
@@ -54,12 +55,16 @@ fn main() {
                 let metrics = Metrics::new(font_size, window);
                 let vp = window.viewport_size();
                 let (cols, rows) = metrics.grid_size(f32::from(vp.width), f32::from(vp.height));
-                let attached = attach(address.as_deref(), cols, rows, &metrics, window)
+                let display = display(&metrics, window);
+                let (client, address) = connect(address.as_deref(), cols, rows, &display)
                     .unwrap_or_else(|e| {
                         eprintln!("nerdr: {e:#}");
                         std::process::exit(1);
                     });
-                let view = cx.new(|cx| TerminalView::new(attached, cols, rows, metrics, window, cx));
+                // Scrollback is replayed ahead of the screen; it scrolls into alacritty's history
+                let params = json!({"terminal": address, "display": display, "history": 5000});
+                let view =
+                    cx.new(|cx| TerminalView::new(&client, params, cols, rows, metrics, window, cx));
                 window.focus(&view.focus_handle(cx));
                 view
             },
@@ -81,74 +86,52 @@ fn display(m: &Metrics, window: &gpui::Window) -> Value {
     })
 }
 
-fn attach(
+/// Connects to hc and picks the terminal: `address`, else the live spike terminal, else a
+/// new shell.
+fn connect(
     address: Option<&str>,
     cols: u16,
     rows: u16,
-    m: &Metrics,
-    window: &gpui::Window,
-) -> Result<Attached> {
-    let mut conn = hc::Conn::connect()?;
-    let display = display(m, window);
-    let address = match address {
-        Some(a) => a.to_string(),
-        None => {
-            let list = conn.call(
-                "terminal.list",
-                json!({"labels": {SPIKE_LABEL: "1"}}),
-            )?;
-            let live = list["terminals"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|t| t["state"] == "live")
-                .and_then(|t| t["address"].as_str());
-            match live {
-                Some(a) => {
-                    eprintln!("nerdr: reusing {a}");
-                    a.to_string()
-                }
-                None => {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                    let run = conn.call(
-                        "terminal.run",
-                        json!({
-                            "labels": {SPIKE_LABEL: "1"},
-                            // Not a child of whatever terminal launched us: it should outlive us
-                            "no_parent": true,
-                            "no_notify": true,
-                            "cwd": home,
-                            "size": {"cols": cols, "rows": rows},
-                            "display": display,
-                            "env": {"COLORTERM": "truecolor", "TERM_PROGRAM": "nerdr"},
-                        }),
-                    )?;
-                    let a = run["address"].as_str().context("terminal.run: no address")?;
-                    eprintln!("nerdr: started {a}");
-                    a.to_string()
-                }
+    display: &Value,
+) -> Result<(hc::Client, String)> {
+    let client = hc::Client::connect()?;
+    if std::env::var_os("NERDR_DEBUG").is_some() {
+        let mut notices = client.notices();
+        std::thread::spawn(move || {
+            while let Some(n) = futures::executor::block_on(notices.next()) {
+                eprintln!("nerdr: {n:?}");
             }
-        }
-    };
-    let res = conn.call(
-        "terminal.attach",
+        });
+    }
+    if let Some(a) = address {
+        return Ok((client, a.to_string()));
+    }
+    let list = client.call_blocking("terminal.list", json!({"labels": {SPIKE_LABEL: "1"}}))?;
+    let live = list["terminals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|t| t["state"] == "live")
+        .and_then(|t| t["address"].as_str());
+    if let Some(a) = live {
+        eprintln!("nerdr: reusing {a}");
+        return Ok((client, a.to_string()));
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let run = client.call_blocking(
+        "terminal.run",
         json!({
-            "terminal": address,
-            "cols": cols,
-            "rows": rows,
+            "labels": {SPIKE_LABEL: "1"},
+            // Not a child of whatever terminal launched us: it should outlive us
+            "no_parent": true,
+            "no_notify": true,
+            "cwd": home,
+            "size": {"cols": cols, "rows": rows},
             "display": display,
-            // Scrollback replayed ahead of the screen; it scrolls into alacritty's history
-            "history": 5000,
+            "env": {"COLORTERM": "truecolor", "TERM_PROGRAM": "nerdr"},
         }),
     )?;
-    let channel = res["channel"].as_u64().context("attach: no channel")? as u32;
-    eprintln!(
-        "nerdr: attached {address} on channel {channel} (resize_notifications={}, automatic_input={})",
-        res["resize_notifications"], res["automatic_input"]
-    );
-    Ok(Attached {
-        conn,
-        channel,
-        address,
-    })
+    let a = run["address"].as_str().context("terminal.run: no address")?;
+    eprintln!("nerdr: started {a}");
+    Ok((client, a.to_string()))
 }

@@ -23,7 +23,7 @@ use gpui::{
     div, fill, font, outline, point, prelude::*, px, size,
 };
 
-use crate::hc::{self, Writer, kind};
+use crate::hc;
 use crate::keys;
 use crate::theme::{self, hsla};
 
@@ -117,16 +117,9 @@ impl Dimensions for TermSize {
     }
 }
 
-pub struct Attached {
-    pub conn: hc::Conn,
-    pub channel: u32,
-    pub address: String,
-}
-
 pub struct TerminalView {
     shared: Arc<Shared>,
-    writer: Writer,
-    channel: u32,
+    stream: Rc<hc::Stream>,
     focus: FocusHandle,
     metrics: Metrics,
     /// Grid size and where the grid was last painted, from prepaint.
@@ -140,20 +133,17 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
+    /// Attaches a terminal on `client`. `attach` holds the `terminal.attach` params
+    /// (terminal, display, history); cols and rows are filled in.
     pub fn new(
-        attached: Attached,
+        client: &hc::Client,
+        mut attach: serde_json::Value,
         cols: u16,
         rows: u16,
         metrics: Metrics,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let Attached {
-            conn,
-            channel,
-            address,
-        } = attached;
-        let writer = conn.writer.clone();
         let debug = std::env::var_os("NERDR_DEBUG").is_some();
         let title = Arc::new(Mutex::new(None));
         let config = term::Config {
@@ -179,7 +169,18 @@ impl TerminalView {
         });
 
         let (wake_tx, mut wake_rx) = unbounded::<()>();
-        spawn_reader(conn, shared.clone(), writer.clone(), channel, wake_tx);
+        let sink = TermSink {
+            shared: shared.clone(),
+            parser: Mutex::new(ansi::Processor::new()),
+            trace: std::env::var_os("NERDR_TRACE")
+                .map(|p| Mutex::new(std::fs::File::create(p).expect("NERDR_TRACE file"))),
+            stats: debug.then(|| Mutex::new(Stats::default())),
+            wake: wake_tx,
+        };
+        let title = format!("nerdr — {}", attach["terminal"].as_str().unwrap_or("?"));
+        attach["cols"] = cols.into();
+        attach["rows"] = rows.into();
+        let stream = Rc::new(client.attach(attach, Arc::new(sink)));
         let ui_shared = shared.clone();
         let wake = cx.spawn(async move |this, cx| {
             while wake_rx.next().await.is_some() {
@@ -191,35 +192,26 @@ impl TerminalView {
         });
 
         let focus = cx.focus_handle();
-        let w = writer.clone();
-        let focus_in = cx.on_focus_in(&focus, window, move |_, _, _| {
-            let _ = w.frame(channel, kind::FOCUS, &[1]);
-        });
-        let w = writer.clone();
-        let focus_out = cx.on_focus_out(&focus, window, move |_, _, _, _| {
-            let _ = w.frame(channel, kind::FOCUS, &[0]);
-        });
+        let focus_in = cx.on_focus_in(&focus, window, |this, _, _| this.stream.focus(true));
+        let focus_out = cx.on_focus_out(&focus, window, |this, _, _, _| this.stream.focus(false));
 
         Self {
             shared,
-            writer,
-            channel,
+            stream,
             focus,
             metrics,
             size: Rc::new(StdCell::new((cols, rows))),
             origin: Rc::new(StdCell::new(point(px(PAD), px(PAD)))),
             scroll_acc: 0.,
             selecting: false,
-            title: format!("nerdr — {address}"),
+            title,
             _tasks: vec![wake],
             _subs: vec![focus_in, focus_out],
         }
     }
 
     fn send(&self, bytes: &[u8]) {
-        if let Err(e) = self.writer.frame(self.channel, kind::DATA, bytes) {
-            eprintln!("nerdr: send failed: {e}");
-        }
+        self.stream.input(bytes);
     }
 
     fn mode(&self) -> TermMode {
@@ -451,8 +443,7 @@ impl Render for TerminalView {
         let metrics = self.metrics.clone();
         let size_cell = self.size.clone();
         let origin = self.origin.clone();
-        let writer = self.writer.clone();
-        let channel = self.channel;
+        let stream = self.stream.clone();
         let focused = self.focus.is_focused(window);
 
         div()
@@ -485,9 +476,7 @@ impl Render for TerminalView {
                                 cols: cols as usize,
                                 rows: rows as usize,
                             });
-                            let mut p = cols.to_le_bytes().to_vec();
-                            p.extend_from_slice(&rows.to_le_bytes());
-                            let _ = writer.frame(channel, kind::RESIZE, &p);
+                            stream.resize(cols, rows);
                         }
                         build_frame(&shared, &metrics, bounds, focused, window)
                     },
@@ -498,101 +487,70 @@ impl Render for TerminalView {
     }
 }
 
-fn spawn_reader(
-    conn: hc::Conn,
+/// The terminal's end of its hc stream: parses output into the term on the reader thread.
+struct TermSink {
     shared: Arc<Shared>,
-    writer: Writer,
-    channel: u32,
+    parser: Mutex<ansi::Processor>,
+    trace: Option<Mutex<std::fs::File>>,
+    stats: Option<Mutex<Stats>>,
     wake: UnboundedSender<()>,
-) {
-    let trace = std::env::var_os("NERDR_TRACE").map(|p| {
-        std::fs::File::create(p).expect("NERDR_TRACE file")
-    });
-    std::thread::Builder::new()
-        .name("hc-reader".into())
-        .spawn(move || {
-            use std::io::Write;
-            let mut trace = trace;
-            let mut parser: ansi::Processor = ansi::Processor::new();
-            let mut stats = Stats::default();
-            let debug = std::env::var_os("NERDR_DEBUG").is_some();
-            let notify = || {
-                if !shared.dirty.swap(true, Ordering::AcqRel) {
-                    let _ = wake.unbounded_send(());
+}
+
+impl TermSink {
+    fn notify(&self) {
+        if !self.shared.dirty.swap(true, Ordering::AcqRel) {
+            let _ = self.wake.unbounded_send(());
+        }
+    }
+}
+
+impl hc::Sink for TermSink {
+    fn attached(&self, result: &serde_json::Value) {
+        let again = self.shared.exited.lock().unwrap().take().is_some();
+        if again {
+            // A new paint replays the screen and history: start from an empty term so
+            // the history isn't doubled.
+            eprintln!("nerdr: attached again on channel {}", result["channel"]);
+            let mut parser = self.parser.lock().unwrap();
+            *parser = ansi::Processor::new();
+            let mut term = self.shared.term.lock();
+            parser.advance(&mut *term, b"\x1bc");
+            term.grid_mut().clear_history();
+        }
+        self.notify();
+    }
+
+    fn data(&self, payloads: &[&[u8]]) {
+        let mut parser = self.parser.lock().unwrap();
+        let mut n = 0;
+        {
+            let mut term = self.shared.term.lock();
+            for p in payloads {
+                if let Some(t) = &self.trace {
+                    use std::io::Write;
+                    let _ = t.lock().unwrap().write_all(p);
                 }
-            };
-            let mut reader = conn.into_reader();
-            let mut batch: Vec<hc::Frame> = Vec::new();
-            loop {
-                // One blocking read, then whatever else is already buffered: parsed under one
-                // lock and paid for with one CREDIT.
-                let first = match reader.next() {
-                    Ok(f) => f,
-                    Err(e) => {
-                        *shared.exited.lock().unwrap() = Some(format!("connection lost: {e}"));
-                        notify();
-                        break;
-                    }
-                };
-                batch.push(first);
-                let mut bytes = batch[0].payload.len();
-                while bytes < (1 << 20) {
-                    match reader.next_buffered() {
-                        Some(Ok(f)) => {
-                            bytes += f.payload.len();
-                            batch.push(f);
-                        }
-                        _ => break,
-                    }
-                }
-                let mut credit = 0usize;
-                {
-                    let mut term = shared.term.lock();
-                    for f in &batch {
-                        if f.channel == channel && f.kind == kind::DATA {
-                            if let Some(t) = trace.as_mut() {
-                                let _ = t.write_all(&f.payload);
-                            }
-                            parser.advance(&mut *term, &f.payload);
-                            credit += f.payload.len();
-                        }
-                    }
-                }
-                if credit > 0 {
-                    let n = credit as u32;
-                    if writer.frame(channel, kind::CREDIT, &n.to_le_bytes()).is_err() {
-                        break;
-                    }
-                    if debug {
-                        stats.add(credit, batch.len());
-                    }
-                }
-                let mut closed = false;
-                for f in batch.drain(..) {
-                    if f.channel == hc::CONTROL {
-                        eprintln!("nerdr: control: {}", String::from_utf8_lossy(&f.payload));
-                    } else if f.channel != channel || f.kind == kind::DATA {
-                    } else if f.kind == kind::CLOSE {
-                        let why = String::from_utf8_lossy(&f.payload).into_owned();
-                        eprintln!("nerdr: stream closed: {why}");
-                        *shared.exited.lock().unwrap() = Some(why);
-                        closed = true;
-                    } else {
-                        eprintln!(
-                            "nerdr: frame kind {} ({} bytes): {:?}",
-                            f.kind,
-                            f.payload.len(),
-                            String::from_utf8_lossy(&f.payload)
-                        );
-                    }
-                }
-                notify();
-                if closed {
-                    break;
-                }
+                parser.advance(&mut *term, p);
+                n += p.len();
             }
-        })
-        .expect("reader thread");
+        }
+        if let Some(s) = &self.stats {
+            s.lock().unwrap().add(n, payloads.len());
+        }
+        self.notify();
+    }
+
+    fn closed(&self, why: hc::Closed) {
+        let why = match why {
+            hc::Closed::Ended(w) => {
+                eprintln!("nerdr: stream closed: {w}");
+                w
+            }
+            hc::Closed::Lost(_) => "reconnecting…".to_string(),
+        };
+        *self.shared.exited.lock().unwrap() = Some(why);
+        self.notify();
+    }
 }
 
 /// Throughput, printed with NERDR_DEBUG when a burst ends.

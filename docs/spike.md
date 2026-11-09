@@ -49,7 +49,7 @@ Implemented; only the parts above were tested by hand:
 - No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), cursor blink, bell, URL detection.
 - `display` is sent only on attach. GPUI reports scale factor 1 before the window is on an output, so the cell size given to the core can be in logical pixels (`CSI 16t` answered 20×8 instead of 41×17 at scale 2). There's no call to update `display` later; re-attach would be the fix.
 - Resize reflows in two places, alacritty in the client and Ghostty in the core. They can disagree on soft-wrapped lines until the program redraws or we re-attach.
-- One terminal, no reconnect after the core restarts (the stream ends; the protocol says to reattach after the `restarted` event).
+- The window shows one terminal, though the connection layer can carry many.
 
 ## Protocol details learned
 
@@ -82,6 +82,7 @@ Channel 0 is JSON-RPC: kind 0, one message per frame, no trailing newline. Reque
 | 0 | DATA | viewer → core | input bytes, as typed (`echo hi\r`) |
 | 1 | CREDIT | viewer → core | u32 LE: DATA bytes consumed |
 | 2 | CLOSE | core → viewer | JSON `{"exit_code":0,"finished_ms":…,"reason":"exited","signal":null}` |
+| 2 | CLOSE | viewer → core | empty: detach; the core answers with an empty CLOSE and stops sending |
 | 3 | RESIZE | viewer → core | u16 LE cols, u16 LE rows |
 | 4 | FOCUS | viewer → core | 1 byte: 1 focused, 0 not |
 | 5 | FACTS | ? | never seen; numbered by elimination |
@@ -116,6 +117,24 @@ The scrollback lines are printed and scroll off the top, so they land in the cli
 - `terminal.run` with `no_parent: true` is needed when nerdr itself runs inside an hc terminal; otherwise the new shell becomes that terminal's child and dies with it.
 - `hc send` pastes (bracketed) and presses enter; in nvim's normal mode the text is inserted. Use `hc keys` for keystrokes. `hc keys` doesn't take `:`.
 - An attach whose client stdin hits EOF sends `^D`: my first probe killed its own shell that way.
+
+**Several streams on one connection.** Each `terminal.attach` gets the next channel (1, 2, …), even for the same terminal twice. `events.subscribe` gets one too.
+
+**Events.** In framed mode, `events.subscribe` returns `{channel, seq, terminals}` (the snapshot). Events then arrive as DATA on that channel, credited like terminal output: JSON lines, `{"jsonrpc":"2.0","method":"event","params":{"type":"finished","terminal":"t39","seq":360,"data":{…}}}`. Types seen: created, foreground, finished, size. `missed` and `heartbeat` are described in the schema but haven't been seen yet.
+
+**Core restart** (`hc server restart`) ends the socket (EOF) with no CLOSE frames first. A new connection works after about 100 ms, and attaching again gives a fresh paint. The programs keep running.
+
+## Connection layer
+
+`hc::Client` (`crates/nerdr/src/hc.rs`): one socket shared by every terminal and the event feed.
+
+- `call(method, params)` returns a future. Replies are matched by id. `call_blocking` is for startup.
+- `attach(params, sink) -> Stream`. Output goes to the `Sink` on the reader thread, one call per batch, then one CREDIT per channel. `Stream` sends input, resize and focus. Dropping it detaches (CLOSE).
+- `notices()` reports Connected, Disconnected, Snapshot and Event. A new listener first gets the current state: Connected, the last snapshot and the events since it. After 1000 events the client subscribes again to get a fresh snapshot.
+- Reconnect: on EOF it fails pending calls, tells each sink `Lost`, redials with backoff from 50 ms to 2 s, then subscribes and attaches every open stream again (with its latest size). A terminal view starts from an empty term on a repaint, so the history isn't doubled. A stream closed by the core is attached again after its terminal's `restarted` event.
+- Writes carry the connection generation, so a write meant for a dropped connection never reaches the new one.
+- Test: `cargo test --release -- --ignored` starts its own core (`HC_SESSION=nerdr-test-<pid>`). It checks two terminals on one connection, input, events, a flood well past the credit window, detach, core restart with reattach and input after it, and a terminal ending. It passed 10 of 10 runs.
+- Throughput is unchanged from the spike: `seq 1 1000000` gives 10–11 MiB/s for both builds in a 798×972 window, against 14.6 MiB/s for a raw client that only credits.
 
 ## Terminal emulation: alacritty_terminal
 
@@ -153,7 +172,7 @@ For one person who knows the code; GPUI is the uncertainty (thin docs, 0.2 API).
 | piece | estimate | notes |
 |---|---|---|
 | Harden the terminal view | 4–6 days | IME, kitty keyboard, latency test, cursor blink, OSC 8, re-attach on core restart, `display` on scale change, keyboard/mouse tests on real hardware |
-| Connection layer | 2–3 days | one connection with many stream channels, a request/reply map instead of blocking calls, `events.subscribe`, reconnect |
+| ~~Connection layer~~ | done (2026-11-09) | one connection with many stream channels, a request/reply map instead of blocking calls, `events.subscribe`, reconnect |
 | Tabs and spaces | 3–4 days | model in the app, persisted with labels (`nerdr.space=…`) or `doc.set`, tab bar, keybindings |
 | Splits | 3–5 days | split tree, resize handles, focus movement; one attach per visible pane, detach hidden ones (or `observe`) |
 | Agent list from `events.subscribe` | 2–3 days | sidebar: status (`idle/working/done/blocked/error` from OSC 7501), title, cwd, jump to it, notifications for blocked |
