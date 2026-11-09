@@ -31,7 +31,9 @@ Verified with screenshots on a headless Hyprland output, input sent with `hc sen
 | Scrollback replayed on attach (`history: 5000`) | yes |
 | Window title from OSC 0/2 | yes |
 
-Implemented but not exercised end to end, because sending real key and mouse events to the window would take focus away from your desktop:
+Tested by hand on real hardware (2026-11-09, Norwegian layout): typing latency and key repeat feel right; AltGr characters, ctrl+arrows, wheel scrollback, selection, ctrl+shift+c and ctrl+shift+v work.
+
+Implemented; only the parts above were tested by hand:
 
 - Keyboard: letters, shift, ctrl (a–z and `@[\]^_`), alt (ESC prefix), arrows/home/end with modifiers (`CSI 1;m X`, SS3 in app-cursor mode), pgup/pgdn/ins/del, F1–F12, enter, tab, shift-tab, esc, backspace (ctrl → BS). Unit tests cover the encoding. AltGr is xkb's Mod5, not Alt, in GPUI, so AltGr characters on a Norwegian layout (`{[]}\|@$`) arrive as `key_char` without an ESC prefix.
 - Scrollback with the wheel, shift+pgup/pgdn. In the alternate screen the wheel sends arrow keys (alternate scroll), and with mouse reporting on, it sends wheel buttons.
@@ -41,7 +43,7 @@ Implemented but not exercised end to end, because sending real key and mouse eve
 
 ## What doesn't work (yet)
 
-- Not checked: how typing feels (latency, key repeat). It's the first thing to try.
+- Keystroke-to-glyph latency not measured (feels fine by hand).
 - No IME (GPUI's `InputHandler` isn't wired). Dead keys/compose come through GPUI's own compose handling.
 - Kitty keyboard protocol: keys are always legacy xterm encoding, even when a program pushes kitty flags (the core tracks the mode, `\e[=0;1u` in the paint). Programs fall back, but e.g. ctrl+enter and shift+enter can't be told apart.
 - No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), cursor blink, bell, URL detection.
