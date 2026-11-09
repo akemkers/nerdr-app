@@ -98,7 +98,17 @@ pub struct Shared {
     pub exited: Mutex<Option<String>>,
     /// Set by the reader, cleared by the UI: one wakeup per frame at most.
     dirty: AtomicBool,
+    /// The core closed the stream for good (the program ended, or attach failed).
+    ended: AtomicBool,
 }
+
+/// What a terminal view tells whoever holds it.
+pub enum TermEvent {
+    /// Its program ended, or the terminal is gone: the tab can close.
+    Exited,
+}
+
+impl gpui::EventEmitter<TermEvent> for TerminalView {}
 
 struct TermSize {
     cols: usize,
@@ -166,6 +176,7 @@ impl TerminalView {
             title,
             exited: Mutex::new(None),
             dirty: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
         });
 
         let (wake_tx, mut wake_rx) = unbounded::<()>();
@@ -183,9 +194,20 @@ impl TerminalView {
         let stream = Rc::new(client.attach(attach, Arc::new(sink)));
         let ui_shared = shared.clone();
         let wake = cx.spawn(async move |this, cx| {
+            let mut told = false;
             while wake_rx.next().await.is_some() {
                 ui_shared.dirty.store(false, Ordering::Release);
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let ended = ui_shared.ended.load(Ordering::Acquire);
+                let tell = ended && !told;
+                told = ended;
+                let alive = this.update(cx, |this, cx| {
+                    this.refresh_title();
+                    cx.notify();
+                    if tell {
+                        cx.emit(TermEvent::Exited);
+                    }
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -422,6 +444,19 @@ impl TerminalView {
     }
 }
 
+impl TerminalView {
+    /// The program's title (OSC 0/2), or `nerdr — <address>` until it sets one.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn refresh_title(&mut self) {
+        if let Some(t) = self.shared.title.lock().unwrap().take() {
+            self.title = t;
+        }
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -430,9 +465,7 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(t) = self.shared.title.lock().unwrap().take() {
-            self.title = t;
-        }
+        self.refresh_title();
         let exited = self.shared.exited.lock().unwrap().clone();
         match &exited {
             Some(why) => window.set_window_title(&format!("{} [{why}]", self.title)),
@@ -506,6 +539,7 @@ impl TermSink {
 
 impl hc::Sink for TermSink {
     fn attached(&self, result: &serde_json::Value) {
+        self.shared.ended.store(false, Ordering::Release);
         let again = self.shared.exited.lock().unwrap().take().is_some();
         if again {
             // A new paint replays the screen and history: start from an empty term so
@@ -544,6 +578,7 @@ impl hc::Sink for TermSink {
         let why = match why {
             hc::Closed::Ended(w) => {
                 eprintln!("nerdr: stream closed: {w}");
+                self.shared.ended.store(true, Ordering::Release);
                 w
             }
             hc::Closed::Lost(_) => "reconnecting…".to_string(),

@@ -1,23 +1,25 @@
-//! nerdr spike: one GPUI window with one hc terminal in it.
+//! nerdr: a GPUI window of hc terminals, in tabs grouped into spaces.
 //!
-//! `nerdr [ADDRESS]` attaches to that terminal. Without one it reuses the live terminal
-//! labelled `nerdr.spike=1`, or starts a new shell with that label.
+//! `nerdr [TERMINAL]` opens the saved layout, plus that terminal (an address or a name) as
+//! a tab. With nothing saved and no terminal given, it starts a shell.
 
 mod hc;
 mod keys;
 mod theme;
 mod view;
+mod workspace;
 
 use std::borrow::Cow;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use gpui::{
-    App, AppContext, Application, Bounds, Focusable, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
 
-use crate::view::{Metrics, TerminalView};
+use crate::view::Metrics;
+use crate::workspace::Workspace;
 
 const FONTS: [&[u8]; 4] = [
     include_bytes!("../fonts/JetBrainsMono-Regular.ttf"),
@@ -25,8 +27,6 @@ const FONTS: [&[u8]; 4] = [
     include_bytes!("../fonts/JetBrainsMono-Bold.ttf"),
     include_bytes!("../fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
-
-const SPIKE_LABEL: &str = "nerdr.spike";
 
 fn main() {
     let address = std::env::args().nth(1);
@@ -56,17 +56,20 @@ fn main() {
                 let vp = window.viewport_size();
                 let (cols, rows) = metrics.grid_size(f32::from(vp.width), f32::from(vp.height));
                 let display = display(&metrics, window);
-                let (client, address) = connect(address.as_deref(), cols, rows, &display)
-                    .unwrap_or_else(|e| {
-                        eprintln!("nerdr: {e:#}");
-                        std::process::exit(1);
-                    });
-                // Scrollback is replayed ahead of the screen; it scrolls into alacritty's history
-                let params = json!({"terminal": address, "display": display, "history": 5000});
-                let view =
-                    cx.new(|cx| TerminalView::new(&client, params, cols, rows, metrics, window, cx));
-                window.focus(&view.focus_handle(cx));
-                view
+                let started = connect().and_then(|client| {
+                    let (layout, version, info) =
+                        workspace::load(&client, address.as_deref(), cols, rows, &display)?;
+                    Ok((client, layout, version, info))
+                });
+                let (client, layout, version, info) = started.unwrap_or_else(|e| {
+                    eprintln!("nerdr: {e:#}");
+                    std::process::exit(1);
+                });
+                let ws = cx.new(|cx| {
+                    Workspace::new(client, layout, version, info, metrics, display, window, cx)
+                });
+                ws.update(cx, |ws, cx| ws.focus_active(window, cx));
+                ws
             },
         );
         opened.expect("could not open window");
@@ -86,52 +89,20 @@ fn display(m: &Metrics, window: &gpui::Window) -> Value {
     })
 }
 
-/// Connects to hc and picks the terminal: `address`, else the live spike terminal, else a
-/// new shell.
-fn connect(
-    address: Option<&str>,
-    cols: u16,
-    rows: u16,
-    display: &Value,
-) -> Result<(hc::Client, String)> {
+fn connect() -> Result<hc::Client> {
     let client = hc::Client::connect()?;
     if std::env::var_os("NERDR_DEBUG").is_some() {
         let mut notices = client.notices();
         std::thread::spawn(move || {
             while let Some(n) = futures::executor::block_on(notices.next()) {
-                eprintln!("nerdr: {n:?}");
+                match n {
+                    hc::Notice::Snapshot { terminals, .. } => {
+                        eprintln!("nerdr: snapshot, {} terminals", terminals.len())
+                    }
+                    n => eprintln!("nerdr: {n:?}"),
+                }
             }
         });
     }
-    if let Some(a) = address {
-        return Ok((client, a.to_string()));
-    }
-    let list = client.call_blocking("terminal.list", json!({"labels": {SPIKE_LABEL: "1"}}))?;
-    let live = list["terminals"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|t| t["state"] == "live")
-        .and_then(|t| t["address"].as_str());
-    if let Some(a) = live {
-        eprintln!("nerdr: reusing {a}");
-        return Ok((client, a.to_string()));
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    let run = client.call_blocking(
-        "terminal.run",
-        json!({
-            "labels": {SPIKE_LABEL: "1"},
-            // Not a child of whatever terminal launched us: it should outlive us
-            "no_parent": true,
-            "no_notify": true,
-            "cwd": home,
-            "size": {"cols": cols, "rows": rows},
-            "display": display,
-            "env": {"COLORTERM": "truecolor", "TERM_PROGRAM": "nerdr"},
-        }),
-    )?;
-    let a = run["address"].as_str().context("terminal.run: no address")?;
-    eprintln!("nerdr: started {a}");
-    Ok((client, a.to_string()))
+    Ok(client)
 }

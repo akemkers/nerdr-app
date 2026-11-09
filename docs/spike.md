@@ -50,7 +50,6 @@ Implemented; only the parts above were tested by hand:
 - No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), cursor blink, bell, URL detection.
 - `display` is sent only on attach. GPUI reports scale factor 1 before the window is on an output, so the cell size given to the core can be in logical pixels (`CSI 16t` answered 20×8 instead of 41×17 at scale 2). There's no call to update `display` later; re-attach would be the fix.
 - Resize reflows in two places, alacritty in the client and Ghostty in the core. They can disagree on soft-wrapped lines until the program redraws or we re-attach.
-- The window shows one terminal, though the connection layer can carry many.
 
 ## Protocol details learned
 
@@ -137,6 +136,18 @@ The scrollback lines are printed and scroll off the top, so they land in the cli
 - Test: `cargo test --release -- --ignored` starts its own core (`HC_SESSION=nerdr-test-<pid>`). It checks two terminals on one connection, input, events, a flood well past the credit window, detach, core restart with reattach and input after it, and a terminal ending. It passed 10 of 10 runs.
 - Throughput is unchanged from the spike: `seq 1 1000000` gives 10–11 MiB/s for both builds in a 798×972 window, against 14.6 MiB/s for a raw client that only credits.
 
+## Spaces and tabs
+
+`crates/nerdr/src/workspace.rs`. A space is a group of tabs, and a tab is one hc terminal. The sidebar on the left lists the spaces with their tabs under them. Clicking an entry selects it.
+
+- **Layout.** Saved in the hc document `nerdr` (`doc.set`, versioned) on every change. On start, tabs whose terminal is gone are dropped, then empty spaces. With nothing left, a shell is started. `nerdr t7` adds t7 as a tab.
+- **Labels.** A space is named after the last part of its active tab's directory (`~` for home). A tab shows its title, else the program's name, else its address. Both come from the event feed. A dot shows the OSC 7501 status: working is yellow, blocked and error are red, done is green, idle is grey.
+- **Lifecycle.** When a program exits, its tab closes and the terminal is removed (`terminal.rm`). ctrl+shift+w kills and removes it. Closing the last tab quits the app. Hidden tabs stay attached, so switching is instant.
+- **Keys.** Taken in the capture phase, before the terminal sees them: ctrl+shift+t new tab (in the active tab's directory), ctrl+shift+n new space (in home), ctrl+shift+w close tab, ctrl+tab / ctrl+shift+tab next and previous tab, alt+1…9 select tab, ctrl+shift+down / ctrl+shift+up next and previous space.
+- **Verified** on a headless Hyprland output against a private core, with keys sent by `hyprctl dispatch "hl.dsp.send_shortcut({ mods = 'CTRL SHIFT', key = 't', window = 'pid:<pid>' })"` (the window doesn't need focus). Checked: new tab and new space, switching, `exit` closing a tab, ctrl+shift+w, the layout and status dots after a restart, and the app quitting on its last tab. Clicking in the sidebar wasn't tested.
+- **Not done.** Renaming spaces, reordering tabs, and limiting background tabs (each one parses its output even when hidden).
+- **Note on OSC 7501:** the report format is `ESC ] 7501 ; state=working:app=x BEL`, fields separated by `:`. The status event's data is `{"status": {...}, "records": {...}, "reported": true}`.
+
 ## Terminal emulation: alacritty_terminal
 
 Kept. It is the parser and grid Zed's terminal uses with GPUI; it gives scrollback, selection, reflow on resize, modes and a damage-free "render the whole viewport" API that was fast enough. It worked first time with the hc paint.
@@ -174,7 +185,7 @@ For one person who knows the code; GPUI is the uncertainty (thin docs, 0.2 API).
 |---|---|---|
 | Harden the terminal view | 4–6 days | IME, kitty keyboard, latency test, cursor blink, OSC 8, re-attach on core restart, `display` on scale change, keyboard/mouse tests on real hardware |
 | ~~Connection layer~~ | done (2026-11-09) | one connection with many stream channels, a request/reply map instead of blocking calls, `events.subscribe`, reconnect |
-| Tabs and spaces | 3–4 days | model in the app, persisted with labels (`nerdr.space=…`) or `doc.set`, tab bar, keybindings |
+| ~~Tabs and spaces~~ | done (2026-11-09) | model in the app, persisted with labels (`nerdr.space=…`) or `doc.set`, tab bar, keybindings |
 | Splits | 3–5 days | split tree, resize handles, focus movement; one attach per visible pane, detach hidden ones (or `observe`) |
 | Agent list from `events.subscribe` | 2–3 days | sidebar: status (`idle/working/done/blocked/error` from OSC 7501), title, cwd, jump to it, notifications for blocked |
 | jetdiff-ui pane | 2–4 days | gpui versions already match; pick the root (`RepoView`/`FileDiffView`), share fonts/theme/assets, follow the terminal's cwd |
