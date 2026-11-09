@@ -44,6 +44,7 @@ Implemented; only the parts above were tested by hand:
 ## What doesn't work (yet)
 
 - Keystroke-to-glyph latency not measured (feels fine by hand).
+- Middle-click paste (primary selection) doesn't work. GPUI's handler is never called on a middle click. Not investigated further; low priority.
 - No IME (GPUI's `InputHandler` isn't wired). Dead keys/compose come through GPUI's own compose handling.
 - Kitty keyboard protocol: keys are always legacy xterm encoding, even when a program pushes kitty flags (the core tracks the mode, `\e[=0;1u` in the paint). Programs fall back, but e.g. ctrl+enter and shift+enter can't be told apart.
 - No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), cursor blink, bell, URL detection.
