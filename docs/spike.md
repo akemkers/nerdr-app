@@ -55,7 +55,7 @@ Implemented; only the parts above were tested by hand:
 
 The OpenRPC schema (`hc schema`) names the frames but not their wire format or kind numbers. I recorded those from `hc attach` through a logging Unix-socket proxy (`XDG_RUNTIME_DIR` pointed `hc` at it).
 
-**Socket.** `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`, session `default` unless `HC_SESSION` is set. Paths over 107 bytes are refused (`hc` says so; it matters for tests in deep temp dirs). The directory also holds `default.holder.<id>.sock`, the holder process, not for clients.
+**Socket.** `$HC_SOCKET`, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`, else `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` (`~/.local/state` by default, the usual case on macOS). Session `default` unless `HC_SESSION` is set. Paths over 107 bytes are refused (`hc` says so; it matters for tests in deep temp dirs). The directory also holds `default.holder.<id>.sock`, the holder process, not for clients.
 
 **Handshake.** Line mode first, one JSON message per line:
 

@@ -71,16 +71,27 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-/// `$HC_SOCKET`, else `$XDG_RUNTIME_DIR/herdr-core/<$HC_SESSION or default>.sock`.
+/// Same order as hc's `paths.rs`: `$HC_SOCKET`, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`,
+/// else beside the state: `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock`.
 pub fn socket_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("HC_SOCKET") {
+    let env = |var| std::env::var_os(var).filter(|v| !v.is_empty());
+    if let Some(p) = env("HC_SOCKET") {
         return Ok(p.into());
     }
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
-    let session = std::env::var("HC_SESSION").unwrap_or_else(|_| "default".into());
-    Ok(PathBuf::from(dir)
-        .join("herdr-core")
-        .join(format!("{session}.sock")))
+    let session = std::env::var("HC_SESSION").unwrap_or_default();
+    let session = match session.trim() {
+        "" => "default",
+        s => s,
+    };
+    let sock = format!("{session}.sock");
+    if let Some(run) = env("XDG_RUNTIME_DIR") {
+        return Ok(PathBuf::from(run).join("herdr-core").join(sock));
+    }
+    let state = match env("XDG_STATE_HOME") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(env("HOME").context("HOME is not set")?).join(".local/state"),
+    };
+    Ok(state.join("herdr-core").join(session).join(sock))
 }
 
 /// Receives one terminal stream. Called on the reader thread, in order.
