@@ -28,12 +28,14 @@ const FONTS: [&[u8]; 4] = [
     include_bytes!("../fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
 
+pub const TITLE: &str = concat!("nerdr-app v", env!("CARGO_PKG_VERSION"));
+
 fn main() {
     let address = std::env::args().nth(1);
     let font_size: f32 = std::env::var("NERDR_FONT_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(14.);
+        .unwrap_or(16.);
 
     Application::new().run(move |cx: &mut App| {
         cx.text_system()
@@ -42,9 +44,9 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1000.), px(680.)), cx);
         let opened = cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(WindowBounds::Maximized(bounds)),
                 titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("nerdr".into()),
+                    title: Some(TITLE.into()),
                     ..Default::default()
                 }),
                 app_id: Some("nerdr".into()),

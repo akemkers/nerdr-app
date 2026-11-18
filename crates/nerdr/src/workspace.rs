@@ -13,7 +13,9 @@
 //! | ctrl+shift+n | new space |
 //! | ctrl+shift+down, ctrl+shift+up | next, previous space |
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
@@ -26,7 +28,7 @@ use serde_json::{Value, json};
 
 use crate::hc;
 use crate::theme::{self, hsla};
-use crate::view::{FAMILY, Metrics, TermEvent, TerminalView};
+use crate::view::{Metrics, TermEvent, TerminalView};
 
 pub const DOC: &str = "nerdr";
 /// Every terminal nerdr starts carries this label.
@@ -208,6 +210,7 @@ pub struct Workspace {
     saving: bool,
     save_again: bool,
     focus: FocusHandle,
+    window_title: Rc<RefCell<String>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -242,6 +245,7 @@ impl Workspace {
             saving: false,
             save_again: false,
             focus: cx.focus_handle(),
+            window_title: Rc::default(),
             _tasks: vec![feed],
         };
         for s in layout.spaces {
@@ -318,7 +322,10 @@ impl Workspace {
         let params = json!({"terminal": address, "display": self.display, "history": 5000});
         let client = self.client.clone();
         let metrics = self.metrics.clone();
-        let view = cx.new(|cx| TerminalView::new(&client, params, cols, rows, metrics, window, cx));
+        let window_title = self.window_title.clone();
+        let view = cx.new(|cx| {
+            TerminalView::new(&client, params, cols, rows, metrics, window_title, window, cx)
+        });
         let a = address.clone();
         let exited = cx.subscribe_in(&view, window, move |this, _, ev, window, cx| match ev {
             TermEvent::Exited => this.on_exited(&a, window, cx),
@@ -618,17 +625,16 @@ impl Workspace {
     fn status_color(&self, address: &str) -> Option<gpui::Hsla> {
         let state = self.info.get(address)?["status"]["state"].as_str()?;
         let c = match state {
-            "working" => 0xe0af68,
-            "blocked" => 0xf7768e,
-            "error" => 0xf7768e,
-            "done" => 0x9ece6a,
-            _ => 0x565f89,
+            "working" => theme::YELLOW,
+            "blocked" | "error" => theme::RED,
+            "done" => theme::GREEN,
+            _ => theme::MUTED,
         };
-        Some(gpui::rgb(c).into())
+        Some(hsla(c))
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let dim: gpui::Hsla = gpui::rgb(0x565f89).into();
+        let dim = hsla(theme::MUTED);
         let fg = hsla(theme::FG);
         let mut col = div()
             .id("sidebar")
@@ -639,8 +645,8 @@ impl Workspace {
             .flex_col()
             .overflow_y_scroll()
             .py(px(8.))
-            .bg(gpui::rgb(0x16161e))
-            .font_family(FAMILY)
+            .bg(hsla(theme::SIDEBAR_BG))
+            .font_family(self.metrics.font.family.clone())
             .text_size(px(13.));
         for (si, s) in self.spaces.iter().enumerate() {
             let active_space = si == self.active;
@@ -674,7 +680,7 @@ impl Workspace {
                     .items_center()
                     .gap(px(6.))
                     .text_color(if selected { fg } else { dim })
-                    .when(selected, |d| d.bg(hsla(theme::SELECTION)))
+                    .when(selected, |d| d.bg(hsla(theme::SIDEBAR_SELECTED)))
                     .child(
                         div()
                             .size(px(7.))

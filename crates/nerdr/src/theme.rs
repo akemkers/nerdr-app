@@ -1,20 +1,29 @@
-//! Colors: a fixed dark palette (Tokyo Night) and alacritty's color model mapped onto it.
+//! Colors: a fixed dark palette (Catppuccin Mocha, as in kitty) and alacritty's color model mapped onto it.
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use gpui::Hsla;
 
-pub const FG: Rgb = Rgb { r: 0xc0, g: 0xca, b: 0xf5 };
-pub const BG: Rgb = Rgb { r: 0x1a, g: 0x1b, b: 0x26 };
-pub const CURSOR: Rgb = Rgb { r: 0xc0, g: 0xca, b: 0xf5 };
-pub const SELECTION: Rgb = Rgb { r: 0x33, g: 0x46, b: 0x7c };
+pub const FG: Rgb = rgb(0xcdd6f4);
+pub const BG: Rgb = rgb(0x181825);
+pub const CURSOR: Rgb = rgb(0xf5e0dc);
+pub const SELECTION: Rgb = rgb(0xf5e0dc);
+pub const SELECTION_FG: Rgb = rgb(0x1e1e2e);
+
+pub const SIDEBAR_BG: Rgb = rgb(0x11111b);
+pub const SIDEBAR_SELECTED: Rgb = rgb(0x313244);
+pub const MUTED: Rgb = rgb(0x7f849c);
+
+pub const YELLOW: Rgb = rgb(0xf9e2af);
+pub const RED: Rgb = rgb(0xf38ba8);
+pub const GREEN: Rgb = rgb(0xa6e3a1);
 
 const ANSI: [u32; 16] = [
-    0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, //
-    0x414868, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
+    0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, //
+    0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
 ];
 
-fn hex(v: u32) -> Rgb {
+const fn rgb(v: u32) -> Rgb {
     Rgb {
         r: (v >> 16) as u8,
         g: (v >> 8) as u8,
@@ -29,7 +38,7 @@ pub fn hex_str(c: Rgb) -> String {
 /// The xterm 256-color palette with our first 16.
 fn indexed_default(i: usize) -> Rgb {
     match i {
-        0..16 => hex(ANSI[i]),
+        0..16 => rgb(ANSI[i]),
         16..232 => {
             let i = i - 16;
             let step = |v: usize| if v == 0 { 0 } else { (v * 40 + 55) as u8 };
@@ -55,7 +64,7 @@ fn named_default(n: NamedColor) -> Rgb {
         DimForeground => dim(FG, BG),
         DimBlack | DimRed | DimGreen | DimYellow | DimBlue | DimMagenta | DimCyan | DimWhite => {
             let base = n as usize - DimBlack as usize;
-            dim(hex(ANSI[base]), BG)
+            dim(rgb(ANSI[base]), BG)
         }
         other => indexed_default(other as usize),
     }

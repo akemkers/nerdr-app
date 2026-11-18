@@ -1,6 +1,6 @@
 //! One hc terminal in a GPUI view: alacritty_terminal keeps the grid, a canvas draws it.
 
-use std::cell::Cell as StdCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,9 @@ use crate::hc;
 use crate::keys;
 use crate::theme::{self, hsla};
 
-pub const FAMILY: &str = "JetBrains Mono";
+// Kitty's font when installed, else the bundled one.
+const FAMILY: &str = "Hack Nerd Font Mono";
+const BUNDLED: &str = "JetBrains Mono";
 const PAD: f32 = 6.;
 
 /// Font and cell size, fixed for the window's life.
@@ -41,11 +43,13 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(font_size: f32, window: &Window) -> Self {
+        let ts = window.text_system();
+        let installed = ts.all_font_names().iter().any(|n| n == FAMILY);
+        let family = if installed { FAMILY } else { BUNDLED };
         let font = Font {
             features: FontFeatures::disable_ligatures(),
-            ..font(FAMILY)
+            ..font(family)
         };
-        let ts = window.text_system();
         let id = ts.resolve_font(&font);
         let size = px(font_size);
         let scale = window.scale_factor();
@@ -56,11 +60,13 @@ impl Metrics {
         let h = f32::from(ts.ascent(id, size)) + f32::from(ts.descent(id, size)).abs();
         // Whole device pixels, so every cell edge lands on a pixel
         let snap = |v: f32| (v * scale).round() / scale;
+        let snap_up = |v: f32| (v * scale).ceil() / scale;
         Self {
             font,
             font_size: size,
             cell_w: snap(adv),
-            cell_h: snap(h * 1.1),
+            // Line height rounded up before the 130%, as kitty does
+            cell_h: snap(snap_up(h) * 1.3),
         }
     }
 
@@ -138,6 +144,8 @@ pub struct TerminalView {
     scroll_acc: f32,
     selecting: bool,
     title: String,
+    /// The window's title as last set, shared by all tabs.
+    window_title: Rc<RefCell<String>>,
     _tasks: Vec<gpui::Task<()>>,
     _subs: Vec<gpui::Subscription>,
 }
@@ -145,12 +153,14 @@ pub struct TerminalView {
 impl TerminalView {
     /// Attaches a terminal on `client`. `attach` holds the `terminal.attach` params
     /// (terminal, display, history); cols and rows are filled in.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: &hc::Client,
         mut attach: serde_json::Value,
         cols: u16,
         rows: u16,
         metrics: Metrics,
+        window_title: Rc<RefCell<String>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -227,6 +237,7 @@ impl TerminalView {
             scroll_acc: 0.,
             selecting: false,
             title,
+            window_title,
             _tasks: vec![wake],
             _subs: vec![focus_in, focus_out],
         }
@@ -346,18 +357,15 @@ impl TerminalView {
             self.report_mouse(button, true, cell, ev.modifiers);
             return;
         }
-        match ev.button {
-            MouseButton::Left => {
-                let ty = match ev.click_count {
-                    2 => SelectionType::Semantic,
-                    3.. => SelectionType::Lines,
-                    _ => SelectionType::Simple,
-                };
-                self.shared.term.lock().selection = Some(Selection::new(ty, p, side));
-                self.selecting = true;
-                cx.notify();
-            }
-            _ => {}
+        if ev.button == MouseButton::Left {
+            let ty = match ev.click_count {
+                2 => SelectionType::Semantic,
+                3.. => SelectionType::Lines,
+                _ => SelectionType::Simple,
+            };
+            self.shared.term.lock().selection = Some(Selection::new(ty, p, side));
+            self.selecting = true;
+            cx.notify();
         }
     }
 
@@ -467,9 +475,14 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_title();
         let exited = self.shared.exited.lock().unwrap().clone();
-        match &exited {
-            Some(why) => window.set_window_title(&format!("{} [{why}]", self.title)),
-            None => window.set_window_title(&self.title),
+        let title = match &exited {
+            Some(why) => format!("{} [{why}]", crate::TITLE),
+            None => crate::TITLE.to_string(),
+        };
+        // Render runs on every output batch; setting the title each time makes macOS redraw the title bar
+        if *self.window_title.borrow() != title {
+            window.set_window_title(&title);
+            *self.window_title.borrow_mut() = title;
         }
 
         let shared = self.shared.clone();
@@ -629,6 +642,7 @@ impl Stats {
 /// Everything one paint needs, built in prepaint.
 struct Frame {
     rects: Vec<(Bounds<Pixels>, Hsla)>,
+    paths: Vec<(gpui::Path<Pixels>, Hsla)>,
     lines: Vec<(Point<Pixels>, ShapedLine)>,
     cursor: Option<(Bounds<Pixels>, Hsla, bool)>,
     line_height: Pixels,
@@ -638,6 +652,9 @@ impl Frame {
     fn paint(self, window: &mut Window, cx: &mut App) {
         for (b, c) in self.rects {
             window.paint_quad(fill(b, c));
+        }
+        for (path, c) in self.paths {
+            window.paint_path(path, c);
         }
         if let Some((b, c, hollow)) = &self.cursor
             && !hollow
@@ -688,6 +705,7 @@ fn build_frame(
         )
     };
     let mut rects: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+    let mut paths = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
     let mut cursor = None;
     {
@@ -728,6 +746,7 @@ fn build_frame(
                 fg = bg;
             }
             if selection.is_some_and(|s| s.contains(cell.point)) {
+                fg = theme::SELECTION_FG;
                 bg = theme::SELECTION;
             }
             let is_cursor = cell.point == cur.point && cur.shape != CursorShape::Hidden;
@@ -802,6 +821,14 @@ fn build_frame(
                         size(w * (x1 - x0), h * (y1 - y0)),
                     );
                     rects.push((b, hsla(fg).opacity(alpha)));
+                }
+                c = ' ';
+            } else if let Some(path) = rounded_corner(cell_rect(col, row, width), c) {
+                paths.push((path, hsla(fg)));
+                c = ' ';
+            } else if let Some(arms) = box_arms(c) {
+                for b in box_rects(cell_rect(col, row, width), arms) {
+                    rects.push((b, hsla(fg)));
                 }
                 c = ' ';
             }
@@ -885,10 +912,149 @@ fn build_frame(
     }
     Frame {
         rects,
+        paths,
         lines,
         cursor,
         line_height: px(ch),
     }
+}
+
+/// Box drawing (U+2500–257F, light and heavy lines) as arm weights: up, down, left, right.
+/// 0 none, 1 light, 2 heavy.
+fn box_arms(c: char) -> Option<[u8; 4]> {
+    Some(match c {
+        '─' => [0, 0, 1, 1],
+        '━' => [0, 0, 2, 2],
+        '│' => [1, 1, 0, 0],
+        '┃' => [2, 2, 0, 0],
+        '┌' => [0, 1, 0, 1],
+        '┍' => [0, 1, 0, 2],
+        '┎' => [0, 2, 0, 1],
+        '┏' => [0, 2, 0, 2],
+        '┐' => [0, 1, 1, 0],
+        '┑' => [0, 1, 2, 0],
+        '┒' => [0, 2, 1, 0],
+        '┓' => [0, 2, 2, 0],
+        '└' => [1, 0, 0, 1],
+        '┕' => [1, 0, 0, 2],
+        '┖' => [2, 0, 0, 1],
+        '┗' => [2, 0, 0, 2],
+        '┘' => [1, 0, 1, 0],
+        '┙' => [1, 0, 2, 0],
+        '┚' => [2, 0, 1, 0],
+        '┛' => [2, 0, 2, 0],
+        '├' => [1, 1, 0, 1],
+        '┝' => [1, 1, 0, 2],
+        '┞' => [2, 1, 0, 1],
+        '┟' => [1, 2, 0, 1],
+        '┠' => [2, 2, 0, 1],
+        '┡' => [2, 1, 0, 2],
+        '┢' => [1, 2, 0, 2],
+        '┣' => [2, 2, 0, 2],
+        '┤' => [1, 1, 1, 0],
+        '┥' => [1, 1, 2, 0],
+        '┦' => [2, 1, 1, 0],
+        '┧' => [1, 2, 1, 0],
+        '┨' => [2, 2, 1, 0],
+        '┩' => [2, 1, 2, 0],
+        '┪' => [1, 2, 2, 0],
+        '┫' => [2, 2, 2, 0],
+        '┬' => [0, 1, 1, 1],
+        '┭' => [0, 1, 2, 1],
+        '┮' => [0, 1, 1, 2],
+        '┯' => [0, 1, 2, 2],
+        '┰' => [0, 2, 1, 1],
+        '┱' => [0, 2, 2, 1],
+        '┲' => [0, 2, 1, 2],
+        '┳' => [0, 2, 2, 2],
+        '┴' => [1, 0, 1, 1],
+        '┵' => [1, 0, 2, 1],
+        '┶' => [1, 0, 1, 2],
+        '┷' => [1, 0, 2, 2],
+        '┸' => [2, 0, 1, 1],
+        '┹' => [2, 0, 2, 1],
+        '┺' => [2, 0, 1, 2],
+        '┻' => [2, 0, 2, 2],
+        '┼' => [1, 1, 1, 1],
+        '┽' => [1, 1, 2, 1],
+        '┾' => [1, 1, 1, 2],
+        '┿' => [1, 1, 2, 2],
+        '╀' => [2, 1, 1, 1],
+        '╁' => [1, 2, 1, 1],
+        '╂' => [2, 2, 1, 1],
+        '╃' => [2, 1, 2, 1],
+        '╄' => [2, 1, 1, 2],
+        '╅' => [1, 2, 2, 1],
+        '╆' => [1, 2, 1, 2],
+        '╇' => [2, 1, 2, 2],
+        '╈' => [1, 2, 2, 2],
+        '╉' => [2, 2, 2, 1],
+        '╊' => [2, 2, 1, 2],
+        '╋' => [2, 2, 2, 2],
+        '╴' => [0, 0, 1, 0],
+        '╵' => [1, 0, 0, 0],
+        '╶' => [0, 0, 0, 1],
+        '╷' => [0, 1, 0, 0],
+        '╸' => [0, 0, 2, 0],
+        '╹' => [2, 0, 0, 0],
+        '╺' => [0, 0, 0, 2],
+        '╻' => [0, 2, 0, 0],
+        '╼' => [0, 0, 1, 2],
+        '╽' => [1, 2, 0, 0],
+        '╾' => [0, 0, 2, 1],
+        '╿' => [2, 1, 0, 0],
+        _ => return None,
+    })
+}
+
+/// Rectangles for a box-drawing cell. The arms reach the cell edges, so lines meet
+/// across rows whatever the line height.
+fn box_rects(r: Bounds<Pixels>, [up, down, left, right]: [u8; 4]) -> Vec<Bounds<Pixels>> {
+    let thick = |w: u8| px(w as f32);
+    let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+    // Whole pixels from the cell edge keep the lines sharp
+    let cx = x + ((w - thick(up.max(down))) / 2.).floor();
+    let cy = y + ((h - thick(left.max(right))) / 2.).floor();
+    // Arms run past the center to cover the joint
+    let over_v = thick(left.max(right));
+    let over_h = thick(up.max(down));
+    let mut out = Vec::new();
+    if up > 0 {
+        out.push(Bounds::new(point(cx, y), size(thick(up), cy - y + over_v)));
+    }
+    if down > 0 {
+        out.push(Bounds::new(point(cx, cy), size(thick(down), y + h - cy)));
+    }
+    if left > 0 {
+        out.push(Bounds::new(point(x, cy), size(cx - x + over_h, thick(left))));
+    }
+    if right > 0 {
+        out.push(Bounds::new(point(cx, cy), size(x + w - cx, thick(right))));
+    }
+    out
+}
+
+/// ╭╮╯╰ as a light line that bends from one cell edge to the other, centered like `box_rects`.
+fn rounded_corner(r: Bounds<Pixels>, c: char) -> Option<gpui::Path<Pixels>> {
+    let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+    let cx = x + ((w - px(1.)) / 2.).floor() + px(0.5);
+    let cy = y + ((h - px(1.)) / 2.).floor() + px(0.5);
+    // Where the line leaves the cell vertically and horizontally
+    let (vy, hx) = match c {
+        '╭' => (y + h, x + w),
+        '╮' => (y + h, x),
+        '╯' => (y, x),
+        '╰' => (y, x + w),
+        _ => return None,
+    };
+    let radius = cx - x;
+    let toward = |from: Pixels, to: Pixels| if to > from { from + radius } else { from - radius };
+    let mut b = gpui::PathBuilder::stroke(px(1.));
+    b.move_to(point(cx, vy));
+    b.line_to(point(cx, toward(cy, vy)));
+    b.curve_to(point(toward(cx, hx), cy), point(cx, cy));
+    b.line_to(point(hx, cy));
+    b.build().ok()
 }
 
 /// U+2580–U+259F as rectangles in cell fractions: (x0, y0, x1, y1, alpha).
@@ -929,4 +1095,20 @@ fn block_element(c: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
         '▟' => &[(0.5, 0., 1., 1., 1.), (0., 0.5, 0.5, 1., 1.)],
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_lines_reach_the_cell_edges() {
+        let cell = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(25.)));
+        let covers = |rects: &[Bounds<Pixels>], p: Point<Pixels>| rects.iter().any(|r| r.contains(&p));
+        let v = box_rects(cell, box_arms('│').unwrap());
+        assert!(covers(&v, point(px(4.5), px(0.))) && covers(&v, point(px(4.5), px(24.9))));
+        let corner = box_rects(cell, box_arms('┌').unwrap());
+        assert!(covers(&corner, point(px(9.9), px(12.5))) && covers(&corner, point(px(4.5), px(24.9))));
+        assert!(!covers(&corner, point(px(4.5), px(0.))));
+    }
 }

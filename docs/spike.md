@@ -7,7 +7,7 @@ cargo run --release              # reuse the live terminal labelled nerdr.spike=
 cargo run --release -- t7        # attach to t7 (an address or a name)
 NERDR_DEBUG=1                    # throughput per burst, unexpected frames, unanswered queries on stderr
 NERDR_TRACE=/path/file           # write every DATA payload to a file
-NERDR_FONT_SIZE=15               # default 14
+NERDR_FONT_SIZE=15               # default 16
 HC_SOCKET / HC_SESSION           # another socket or session
 ```
 
@@ -23,13 +23,13 @@ Verified with screenshots on a headless Hyprland output, input sent with `hc sen
 | First paint, live output, CLOSE when the program exits (shown in the window title) | yes |
 | 16 colours, 256, truecolor, OSC 4/10/11 overrides, bold, italic, bold-italic, dim, inverse, hidden, underline, strikethrough | yes |
 | Wide characters (CJK), emoji, combining marks (approximate) | yes |
-| Box drawing (JetBrains Mono's glyphs meet), block elements U+2580–259F (drawn as rectangles) | yes |
+| Box drawing U+2500–257F, light and heavy (drawn as rectangles, ╭╮╯╰ as curves, so lines meet at any line height), block elements U+2580–259F (drawn as rectangles) | yes |
 | Cursor: block, beam, underline, hidden; outline when unfocused | yes |
 | btop, nvim (syntax, visual selection, statusline), `ls --color`, `clear` | yes |
 | Resizing the window: RESIZE frame → the core resizes the pty → the program redraws | yes (tiled a second window next to it; 118×25 → 58×25, matching `hc get`) |
 | Floods: `yes \| head -1000000`, `seq 1 1000000`, 400k coloured lines with CJK | yes, coherent mid-flood |
 | Scrollback replayed on attach (`history: 5000`) | yes |
-| Window title from OSC 0/2 | yes |
+| OSC 0/2 titles name the tab in the sidebar; the window title is fixed (`nerdr-app v<version>`) | yes |
 
 Tested by hand on real hardware (2026-11-09, Norwegian layout): typing latency and key repeat feel right; AltGr characters, ctrl+arrows, wheel scrollback, selection, ctrl+shift+c and ctrl+shift+v work.
 
@@ -158,7 +158,7 @@ The alternative worth testing before the MVP is **libghostty-vt in the client** 
 
 - A `canvas` element. Prepaint locks the term, walks the viewport once, collects background rectangles (merged per run), underline/strike lines, block elements, the cursor and text segments, then unlocks and shapes. Paint draws quads then lines.
 - Text is shaped per segment (a run of narrow cells with the same font, or one wide cell), with `force_width = cell width`, so glyphs stay on the grid whatever the fallback font. GPUI's per-frame line-layout cache makes unchanged lines nearly free.
-- Cell size: advance of `m`, height = (ascent + descent) × 1.1, both snapped to device pixels. JetBrains Mono embedded (the same files as jetdiff), ligatures off.
+- Cell size: advance of `m`, height = (ascent + descent), rounded up, × 1.3 (like kitty with `modify_font cell_height 130%`), both snapped to device pixels. Hack Nerd Font Mono when installed (as in kitty), else the embedded JetBrains Mono (the same files as jetdiff). Ligatures off.
 - **GPUI 0.2.2 bug**: `TextSystem::layout_line` merges neighbouring runs that have the same colour and decoration even when their fonts differ, so `\e[1m` text in the default colour came out regular. Worked around by starting a new segment at every font change. Worth reporting upstream; jetdiff may hit it too.
 
 ## Performance
