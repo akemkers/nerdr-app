@@ -357,7 +357,6 @@ impl TerminalView {
                 self.selecting = true;
                 cx.notify();
             }
-            MouseButton::Middle => self.paste(cx.read_from_primary()),
             _ => {}
         }
     }
@@ -404,10 +403,11 @@ impl TerminalView {
         }
         if self.selecting {
             self.selecting = false;
-            let text = self.shared.term.lock().selection_to_string();
-            match text {
-                Some(t) if !t.is_empty() => cx.write_to_primary(ClipboardItem::new_string(t)),
-                _ => self.shared.term.lock().selection = None,
+            {
+                let mut term = self.shared.term.lock();
+                if term.selection_to_string().is_none_or(|t| t.is_empty()) {
+                    term.selection = None;
+                }
             }
             cx.notify();
         }
