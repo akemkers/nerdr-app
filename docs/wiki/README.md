@@ -1,6 +1,6 @@
 # Wiki
 
-Facts we had to find out about the systems around nerdr: hc, GPUI, macOS, kitty, the shell. Each one cost a session to learn; the wiki keeps it from costing another. How nerdr itself works and what's left to do stays in `docs/spike.md`.
+Knowledge worth having again later: how nerdr works and why, decisions and what they rejected, procedures, gotchas, facts about hc, GPUI, macOS, kitty, the shell and any other tool. Each one cost a session to learn; the wiki keeps it from costing another. Status and the plan (what works, what's left) stay in `docs/spike.md`.
 
 ## Layout
 
@@ -29,6 +29,6 @@ updated: YYYY-MM-DD
 
 ## Operations
 
-- **add**: after a task that taught something durable (a gotcha, an API quirk, why something is the way it is), add it to its page, update `index.md` if a page was added, append to `log.md`. Commit with the code it came from, or alone as `wiki: <title>`.
+- **add**: after a task that taught something durable (a decision and its reason, a procedure, a gotcha, an API quirk, how a part of nerdr works), add it to its page, update `index.md` if a page was added, append to `log.md`. Commit with the code it came from, or alone as `wiki: <title>`.
 - **query**: read `index.md`, then the pages it points to. Check a fact against its source before building on it when the version may have moved.
 - **lint** (when asked): pages missing from the index and vice versa, facts without a source, duplicates across pages, facts the code or a newer version contradicts.

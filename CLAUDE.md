@@ -10,7 +10,7 @@ A native desktop app for terminals and coding agents, written in Rust with GPUI.
 
 ## Wiki
 
-`docs/wiki/` holds facts learned about hc, GPUI, macOS, kitty and the shell. Read `docs/wiki/index.md` before working against one of them. When a task teaches you something durable about them, add it (rules: `docs/wiki/README.md`).
+`docs/wiki/` is the project's memory: how nerdr works and why, decisions, procedures, gotchas, and facts about hc, GPUI, macOS and other tools. Read `docs/wiki/index.md` at the start of a task. When a task teaches you something worth knowing later, add it (rules: `docs/wiki/README.md`).
 
 ## Status
 
