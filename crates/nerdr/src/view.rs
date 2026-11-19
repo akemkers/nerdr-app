@@ -330,16 +330,27 @@ impl TerminalView {
             }
         }
         if m.shift && !m.control && matches!(k.key.as_str(), "pageup" | "pagedown") {
-            let rows = self.size.get().1 as i32;
-            let d = if k.key == "pageup" { rows } else { -rows };
-            self.shared.term.lock().scroll_display(Scroll::Delta(d));
-            cx.notify();
+            self.scroll_pages(if k.key == "pageup" { 1 } else { -1 }, cx);
             return;
         }
         let mode = self.mode();
         let action = if ev.is_held { KeyAction::Repeat } else { KeyAction::Press };
         if let Some(bytes) = keys::encode(k, mode, action) {
             self.pressed.insert(k.key.clone());
+            self.type_bytes(&bytes, cx);
+        }
+    }
+
+    /// Up into the scrollback by whole screens; negative goes down.
+    pub fn scroll_pages(&mut self, pages: i32, cx: &mut Context<Self>) {
+        let rows = self.size.get().1 as i32;
+        self.shared.term.lock().scroll_display(Scroll::Delta(pages * rows));
+        cx.notify();
+    }
+
+    /// A key on the program's behalf (the prefix pressed twice), encoded as if typed.
+    pub fn type_keystroke(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        if let Some(bytes) = keys::encode(ks, self.mode(), KeyAction::Press) {
             self.type_bytes(&bytes, cx);
         }
     }

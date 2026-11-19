@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::hc;
+use crate::prefix::{self, Action, Prefix};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
 
@@ -201,6 +202,8 @@ struct Space {
     name: Option<String>,
     tabs: Vec<Tab>,
     active: usize,
+    /// The tab active before this one, for tmux's last-window.
+    last: Option<String>,
 }
 
 struct Tab {
@@ -222,6 +225,11 @@ pub struct Workspace {
     save_again: bool,
     focus: FocusHandle,
     window_title: Rc<RefCell<String>>,
+    prefix: Prefix,
+    /// tmux's `base-index`: the number of the first tab.
+    base_index: usize,
+    /// The prefix was pressed; the next key is a command.
+    prefix_armed: bool,
     /// The scale `metrics` and `display` were made for.
     scale: f32,
     _tasks: Vec<Task<()>>,
@@ -260,6 +268,9 @@ impl Workspace {
             save_again: false,
             focus: cx.focus_handle(),
             window_title: Rc::default(),
+            prefix: Prefix::default(),
+            base_index: 0,
+            prefix_armed: false,
             scale: window.scale_factor(),
             _tasks: vec![feed],
             _subs: vec![cx.observe_window_bounds(window, Self::on_bounds)],
@@ -275,6 +286,7 @@ impl Workspace {
                 name: s.name,
                 tabs,
                 active: s.active,
+                last: None,
             });
         }
         this.save(cx);
@@ -401,7 +413,9 @@ impl Workspace {
         };
         if let Some(t) = tab
             && t < s.tabs.len()
+            && t != s.active
         {
+            s.last = s.tabs.get(s.active).map(|t| t.address.clone());
             s.active = t;
         }
         self.active = space;
@@ -414,6 +428,16 @@ impl Workspace {
         if let Some(s) = self.spaces.get(self.active) {
             let n = s.tabs.len() as isize;
             let t = (s.active as isize + d).rem_euclid(n.max(1)) as usize;
+            self.select(self.active, Some(t), window, cx);
+        }
+    }
+
+    fn last_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.spaces.get(self.active) else {
+            return;
+        };
+        let last = s.last.as_ref().and_then(|a| s.tabs.iter().position(|t| &t.address == a));
+        if let Some(t) = last {
             self.select(self.active, Some(t), window, cx);
         }
     }
@@ -459,6 +483,7 @@ impl Workspace {
                         name: None,
                         tabs: vec![tab],
                         active: 0,
+                        last: None,
                     });
                     let last = this.spaces.len() - 1;
                     this.select(last, Some(0), window, cx);
@@ -581,54 +606,58 @@ impl Workspace {
         cx.notify();
     }
 
+    /// tmux-style: the prefix arms, the next key is the command. Every other key goes to
+    /// the terminal.
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
-        let m = &k.modifiers;
-        let key = k.key.as_str();
-        // Option+digit types characters on macOS ([]|@ on Norwegian layouts), so tabs use cmd there
-        let tab_jump = if cfg!(target_os = "macos") {
-            m.platform && !m.alt
+        if !self.prefix_armed {
+            if self.prefix.matches(k) {
+                self.prefix_armed = true;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        // A lone modifier (shift for `&`) doesn't end the wait
+        if matches!(k.key.as_str(), "shift" | "control" | "alt" | "platform" | "function") {
+            return;
+        }
+        self.prefix_armed = false;
+        cx.stop_propagation();
+        cx.notify();
+        let action = if self.prefix.matches(k) {
+            Some(Action::SendPrefix)
         } else {
-            m.alt && !m.platform
+            prefix::default_action(&prefix::key_name(k), self.base_index)
         };
-        let handled = match (m.control, m.shift, m.alt, key) {
-            (true, true, false, "t") => {
-                self.new_tab(false, window, cx);
-                true
+        if let Some(a) = action {
+            self.run(a, window, cx);
+        }
+    }
+
+    fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            Action::NewTab => self.new_tab(false, window, cx),
+            Action::NewSpace => self.new_tab(true, window, cx),
+            Action::NextTab => self.cycle_tab(1, window, cx),
+            Action::PrevTab => self.cycle_tab(-1, window, cx),
+            Action::SelectTab(t) => self.select(self.active, Some(t), window, cx),
+            Action::LastTab => self.last_tab(window, cx),
+            Action::CloseTab => self.close_tab(window, cx),
+            Action::NextSpace => self.cycle_space(1, window, cx),
+            Action::PrevSpace => self.cycle_space(-1, window, cx),
+            Action::ScrollPageUp => {
+                if let Some(t) = self.active_tab() {
+                    t.view.update(cx, |v, cx| v.scroll_pages(1, cx));
+                }
             }
-            (true, true, false, "n") => {
-                self.new_tab(true, window, cx);
-                true
+            Action::SendPrefix => {
+                let ks = self.prefix.keystroke();
+                if let Some(t) = self.active_tab() {
+                    t.view.update(cx, |v, cx| v.type_keystroke(&ks, cx));
+                }
             }
-            (true, true, false, "w") => {
-                self.close_tab(window, cx);
-                true
-            }
-            (true, false, false, "tab") => {
-                self.cycle_tab(1, window, cx);
-                true
-            }
-            (true, true, false, "tab") => {
-                self.cycle_tab(-1, window, cx);
-                true
-            }
-            (true, true, false, "down") => {
-                self.cycle_space(1, window, cx);
-                true
-            }
-            (true, true, false, "up") => {
-                self.cycle_space(-1, window, cx);
-                true
-            }
-            (false, false, _, d) if tab_jump && d.len() == 1 && ("1"..="9").contains(&d) => {
-                let t = d.parse::<usize>().unwrap() - 1;
-                self.select(self.active, Some(t), window, cx);
-                true
-            }
-            _ => false,
-        };
-        if handled {
-            cx.stop_propagation();
+            Action::Quit => cx.quit(),
         }
     }
 
@@ -730,6 +759,7 @@ impl Workspace {
                             .rounded(px(4.))
                             .when_some(dot, |d, c| d.bg(c)),
                     )
+                    .child(div().flex_none().child((self.base_index + ti).to_string()))
                     .child(
                         div()
                             .flex_1()
@@ -744,7 +774,16 @@ impl Workspace {
                 col = col.child(row);
             }
         }
-        col
+        // Red while the prefix waits for its key, like tmux's status bar with client_prefix
+        let armed = self.prefix_armed;
+        let badge = div()
+            .px(px(6.))
+            .rounded(px(4.))
+            .text_color(if armed { hsla(theme::SIDEBAR_BG) } else { dim })
+            .when(armed, |d| d.bg(hsla(theme::RED)))
+            .child(self.prefix.name());
+        col.child(div().flex_1())
+            .child(div().flex_none().flex().mx(px(10.)).mt(px(10.)).child(badge))
     }
 }
 

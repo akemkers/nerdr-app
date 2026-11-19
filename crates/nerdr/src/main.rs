@@ -6,6 +6,7 @@
 mod hc;
 mod ime;
 mod keys;
+mod prefix;
 mod theme;
 mod view;
 mod workspace;

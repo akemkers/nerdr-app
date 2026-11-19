@@ -18,7 +18,15 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 
 - On macOS option types characters when the layout gives one (`[]{}|@` on Norwegian layouts), the same way shift does. Without one (option+arrow) it is sent as alt. Why: those characters can't be typed otherwise. Commit 28d7583.
 - Cost: option is no meta key on macOS, so alt+b / alt+f in the shell type characters. Rejected: kitty's "right option is alt", because GPUI's `Modifiers` has no left/right. Open: whether the user needs meta.
-- Tab jumping is cmd+1…9 on macOS and alt+1…9 on Linux. Why: alt+digit is option+digit on macOS and stole `[` `]`. Commit a040014. The other workspace keys are still ctrl+shift on both; moving them to cmd on macOS is an open question.
+- superseded 2026-11-19: tab jumping was cmd+1…9 on macOS and alt+1…9 on Linux (commit a040014), because alt+digit stole option+digit's `[` `]`. Replaced by tmux-style prefix keys, see below.
+
+## Workspace keys: tmux-style
+
+- The user is a tmux user and wants to recognise the controls at once, so the workspace keys are tmux's: a prefix, then tmux's key for the command. The model is the user's tmux nerdr (`~/git/nerdr`, README "Prefikset"). Spaces are tmux's sessions, tabs its windows, splits will be its panes.
+- Why a prefix and no modifier shortcuts: nothing is taken from the program in the terminal, and option/alt/cmd stay free on every platform (the macOS collisions above are gone).
+- A key after the prefix is matched by the character it types (`key_char`), as tmux names keys, so `&` `(` `)` work on Norwegian layouts where they are shift+digit. `prefix.rs`.
+- The prefix pressed twice sends it to the program, like tmux's `send-prefix`.
+- Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
 
 ## Mouse and clipboard
 

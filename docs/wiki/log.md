@@ -11,3 +11,6 @@ New page testing; hc's test section moved there.
 
 ## [2026-11-19] add | Daily use and upstream reports
 New page daily-use. hc and gpui mark the OSC 8 paint gap and the layout_line bug as worth reporting.
+
+## [2026-11-19] add | tmux-style workspace keys
+input: prefix keys replace the modifier shortcuts (cmd/alt+digit superseded). daily-use: the user is a tmux user.
