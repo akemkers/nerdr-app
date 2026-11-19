@@ -21,5 +21,5 @@ updated: 2026-11-19
 ## Attach, paint, display
 
 - `display` (colors and cell size) is only taken in `terminal.attach`; no call updates it later. hc 0.1.21 `hc schema`. nerdr attaches again when the scale changes, commit 28b5f4a.
-- The paint on attach doesn't carry OSC 8: a link printed before the attach arrives as plain text. Live DATA passes OSC 8 through. Observed with hc 0.1.21, commit c0bb232.
+- The paint on attach doesn't carry OSC 8: a link printed before the attach arrives as plain text. Live DATA passes OSC 8 through. Observed with hc 0.1.21, commit c0bb232. Not reported to herdr-core yet; worth an issue.
 - The core answers kitty's `CSI ? u` itself and restores the kitty flags in the paint (`CSI = flags ; 1 u`). The client only tracks the flags. `docs/spike.md`.

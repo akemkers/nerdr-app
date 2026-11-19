@@ -27,4 +27,4 @@ Paths are under `~/.cargo/registry/src/index.crates.io-*/gpui-0.2.2/src/`.
 
 - `WindowTextSystem::font_id` is private. Check that a font is installed with `all_font_names()`; `resolve_font` silently falls back. Commit 2ce9a62.
 - `PathBuilder::stroke(width)` with `move_to`/`line_to`/`curve_to` and `window.paint_path` draws curves (rounded box corners). Commit 2ce9a62.
-- `layout_line` merges neighbouring runs with the same color even when the fonts differ, so bold in the default color came out regular. `docs/spike.md`.
+- `layout_line` merges neighbouring runs with the same color even when the fonts differ, so bold in the default color came out regular. nerdr works around it by starting a new segment at every font change. `docs/spike.md`. Not reported upstream yet; worth an issue (jetdiff may hit it too).

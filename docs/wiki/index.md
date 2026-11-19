@@ -2,6 +2,7 @@
 
 nerdr:
 
+- [[daily-use]]: how the user uses nerdr, and so what it must handle first
 - [[input]]: how keys, IME, option/alt, mouse, clipboard and links reach the program, and why
 - [[rendering]]: font and cell size, colors, box drawing, cursor and overlays, and why
 - [[window]]: window size and the fixed title, and why

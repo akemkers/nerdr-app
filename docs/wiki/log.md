@@ -8,3 +8,6 @@ Pages: input, rendering, window. Decisions from commits ad6910a..a040014, with w
 
 ## [2026-11-19] add | Testing nerdr as an agent
 New page testing; hc's test section moved there.
+
+## [2026-11-19] add | Daily use and upstream reports
+New page daily-use. hc and gpui mark the OSC 8 paint gap and the layout_line bug as worth reporting.
