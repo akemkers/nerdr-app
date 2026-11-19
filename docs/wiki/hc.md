@@ -14,12 +14,9 @@ updated: 2026-11-19
 - On macOS there's no `XDG_RUNTIME_DIR`, so the socket is `~/.local/state/herdr-core/default/default.sock`. Observed 2026-11-18.
 - nerdr follows the order except the config `socket` and the `/run/user` fallback. Commit 6929829.
 
-## Testing without touching the user's terminals
+## Testing
 
-- `HC_SESSION=<name>` gives a separate core with its own terminals and state in `~/.local/state/herdr-core/<name>/`. Stop it with `HC_SESSION=<name> hc server stop`, then delete that folder.
-- `hc server status` starts the core when none is running, so checking a stopped test session brings it back. Observed with hc 0.1.21.
-- `hc run --bg --json "<cmd>"` starts a terminal and prints `{"address":"t2",...}`. `nerdr t2` opens it as a tab.
-- `hc send <t> <text>` pastes into a live terminal and presses enter. If the user is typing there at the same time the texts merge (`clear` + `ls -la` ran as `clearls -la`). Send to test sessions only.
+- Isolated test sessions (`HC_SESSION`), `hc run --bg --json`, and the risks of `hc send`: [[testing]].
 
 ## Attach, paint, display
 
