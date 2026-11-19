@@ -25,6 +25,7 @@ use gpui::{
 };
 
 use crate::hc;
+use crate::ime::TermInput;
 use crate::keys::{self, KeyAction};
 use crate::theme::{self, hsla};
 
@@ -153,6 +154,7 @@ pub struct TerminalView {
     focused: bool,
     /// The OSC 8 link under the mouse: underlined, and a click opens it.
     hover_link: Option<Hyperlink>,
+    marked: Option<String>,
     /// In the off half of a blink.
     blink_off: bool,
     /// A key was pressed: keep the cursor on through the next tick.
@@ -267,6 +269,7 @@ impl TerminalView {
             window_title,
             focused: false,
             hover_link: None,
+            marked: None,
             blink_off: false,
             blink_hold: false,
             _tasks: vec![wake, blink],
@@ -296,6 +299,19 @@ impl TerminalView {
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = &k.modifiers;
+        let text_key = k
+            .key_char
+            .as_ref()
+            .is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control))
+            && !m.control
+            && !m.alt
+            && !m.platform
+            && !m.function;
+        // Left to the input handler (ime.rs), so dead keys and IMEs can compose. Not when
+        // the program wants every key as an escape code.
+        if text_key && !self.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+            return;
+        }
         cx.stop_propagation();
         if m.control && m.shift {
             match k.key.as_str() {
@@ -323,16 +339,53 @@ impl TerminalView {
         let action = if ev.is_held { KeyAction::Repeat } else { KeyAction::Press };
         if let Some(bytes) = keys::encode(k, mode, action) {
             self.pressed.insert(k.key.clone());
-            self.blink_off = false;
-            self.blink_hold = true;
-            {
-                let mut t = self.shared.term.lock();
-                t.scroll_display(Scroll::Bottom);
-                t.selection = None;
-            }
-            self.send(&bytes);
-            cx.notify();
+            self.type_bytes(&bytes, cx);
         }
+    }
+
+    /// Input from the keyboard: back to the bottom, selection gone, cursor shown.
+    fn type_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.blink_off = false;
+        self.blink_hold = true;
+        {
+            let mut t = self.shared.term.lock();
+            t.scroll_display(Scroll::Bottom);
+            t.selection = None;
+        }
+        self.send(bytes);
+        cx.notify();
+    }
+
+    /// Text being composed by the IME or a dead key, drawn at the cursor until committed.
+    pub fn marked(&self) -> Option<&str> {
+        self.marked.as_deref()
+    }
+
+    pub fn set_marked(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.marked = (!text.is_empty()).then(|| text.to_string());
+        cx.notify();
+    }
+
+    pub fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.marked = None;
+        if text.is_empty() {
+            cx.notify();
+        } else {
+            self.type_bytes(text.as_bytes(), cx);
+        }
+    }
+
+    /// The cursor cell in window coordinates, where the IME puts its candidate window.
+    pub fn cursor_bounds(&self) -> Bounds<Pixels> {
+        let term = self.shared.term.lock();
+        let p = term.grid().cursor.point;
+        let row = p.line.0 + term.grid().display_offset() as i32;
+        let o = self.origin.get();
+        let (cw, ch) = (self.metrics.cell_w, self.metrics.cell_h);
+        Bounds::new(
+            point(o.x + px(p.column.0 as f32 * cw), o.y + px(row as f32 * ch)),
+            size(px(cw), px(ch)),
+        )
     }
 
     /// Only with the kitty protocol's event types, and only for keys whose press went out.
@@ -566,6 +619,8 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let hide_cursor = focused && self.blink_off;
         let hover_link = self.hover_link.clone();
+        let marked = self.marked.clone();
+        let input = (cx.entity(), self.focus.clone());
 
         div()
             .id("terminal")
@@ -603,12 +658,17 @@ impl Render for TerminalView {
                         }
                         let state = FrameState {
                             focused,
-                            hide_cursor,
+                            hide_cursor: hide_cursor || marked.is_some(),
                             hover_link: hover_link.as_ref(),
+                            marked: marked.as_deref(),
                         };
                         build_frame(&shared, &metrics, bounds, state, window)
                     },
-                    move |_, frame, window, cx| frame.paint(window, cx),
+                    move |_, frame, window, cx| {
+                        let (view, focus) = input;
+                        window.handle_input(&focus, TermInput(view), cx);
+                        frame.paint(window, cx)
+                    },
                 )
                 .size_full(),
             )
@@ -727,6 +787,8 @@ struct Frame {
     paths: Vec<(gpui::Path<Pixels>, Hsla)>,
     lines: Vec<(Point<Pixels>, ShapedLine)>,
     cursor: Option<(Bounds<Pixels>, Hsla, bool)>,
+    /// IME text on top of everything: its background and where it goes.
+    composing: Option<(Bounds<Pixels>, Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
 }
 
@@ -748,6 +810,10 @@ impl Frame {
         }
         if let Some((b, c, true)) = self.cursor {
             window.paint_quad(outline(b, c, gpui::BorderStyle::Solid));
+        }
+        if let Some((bg, origin, line)) = &self.composing {
+            window.paint_quad(fill(*bg, hsla(theme::BG)));
+            let _ = line.paint(*origin, self.line_height, window, cx);
         }
     }
 }
@@ -776,6 +842,7 @@ struct FrameState<'a> {
     focused: bool,
     hide_cursor: bool,
     hover_link: Option<&'a Hyperlink>,
+    marked: Option<&'a str>,
 }
 
 fn build_frame(
@@ -789,6 +856,7 @@ fn build_frame(
         focused,
         hide_cursor,
         hover_link,
+        marked,
     } = state;
     let (cw, ch) = (m.cell_w, m.cell_h);
     let o = bounds.origin;
@@ -802,12 +870,14 @@ fn build_frame(
     let mut paths = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
     let mut cursor = None;
+    let cursor_cell;
     {
         let term = shared.term.lock();
         let content = term.renderable_content();
         let colors = content.colors;
         let offset = content.display_offset as i32;
         let cur = content.cursor;
+        cursor_cell = (cur.point.column.0, (cur.point.line.0 + offset) as usize);
         let cursor_color = colors[NamedColor::Cursor].unwrap_or(theme::CURSOR);
         let default_bg = colors[NamedColor::Background].unwrap_or(theme::BG);
         let selection = content.selection;
@@ -1006,11 +1076,31 @@ fn build_frame(
         );
         lines.push((origin, shaped));
     }
+    let mut composing = None;
+    if let Some(text) = marked {
+        let run = TextRun {
+            len: text.len(),
+            font: m.font.clone(),
+            color: hsla(theme::FG),
+            background_color: None,
+            underline: Some(gpui::UnderlineStyle {
+                thickness: px(1.),
+                color: Some(hsla(theme::FG)),
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let shaped = ts.shape_line(SharedString::from(text.to_string()), m.font_size, &[run], None);
+        let origin = cell_rect(cursor_cell.0, cursor_cell.1, 1).origin;
+        let bg = Bounds::new(origin, size(shaped.width, px(ch)));
+        composing = Some((bg, origin, shaped));
+    }
     Frame {
         rects,
         paths,
         lines,
         cursor,
+        composing,
         line_height: px(ch),
     }
 }

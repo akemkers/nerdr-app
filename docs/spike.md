@@ -43,13 +43,13 @@ Implemented; only the parts above were tested by hand:
 - FOCUS frames on window focus in/out.
 - Cursor blink (530 ms) when the program asks for it (`CSI 1/3/5 q`, `CSI ?12h`) and the terminal has focus. A key press shows the cursor again.
 - OSC 8 links: underlined and a hand cursor on hover, a click without a drag opens it. Only links from live output: the paint on attach (hc 0.1.21) has no OSC 8, so links already on screen then are plain text.
+- IME and dead keys through GPUI's `InputHandler` (`ime.rs`): plain text keys (no ctrl/alt/cmd) are left to it, so the platform can compose; the composition is drawn underlined at the cursor and sent when committed. Holding a key repeats it (no macOS accent menu). With kitty's "all keys as escape codes" the keys go through `on_key_down` instead, without composing.
 - `display` (colors and cell size in device pixels) follows the scale: the core only takes it on attach, so when the scale changes (another display, or the first real one on Linux) the cell size is recomputed and every tab attaches again.
 
 ## What doesn't work (yet)
 
 - Keystroke-to-glyph latency not measured (feels fine by hand).
 - Middle-click may never reach nerdr: on Linux, GPUI did not call the middle-button handler when tested. If so, programs with mouse reporting (vim `mouse=a`, tmux) get no middle-clicks either. Not investigated.
-- No IME (GPUI's `InputHandler` isn't wired). Dead keys/compose come through GPUI's own compose handling.
 - No images (kitty/sixel), undercurl styles (every underline style is drawn as one line), bell, URL detection.
 - Resize reflows in two places, alacritty in the client and Ghostty in the core. They can disagree on soft-wrapped lines until the program redraws or we re-attach.
 

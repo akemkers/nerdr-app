@@ -4,6 +4,7 @@
 //! a tab. With nothing saved and no terminal given, it starts a shell.
 
 mod hc;
+mod ime;
 mod keys;
 mod theme;
 mod view;
