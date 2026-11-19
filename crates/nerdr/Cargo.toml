@@ -11,3 +11,4 @@ futures = "0.3"
 gpui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+regex = "1"

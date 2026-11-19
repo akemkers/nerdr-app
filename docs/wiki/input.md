@@ -30,9 +30,12 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - Rejected: starting a tmux server to read `tmux.conf` when none runs, because that runs the user's plugins too (tpm, continuum's session restore). Without a running tmux the defaults apply. Also rejected: parsing `tmux.conf` ourselves, since tmux's own parser is the only exact one.
 - `NERDR_DEBUG=1` logs the prefix, base-index and the mapped bindings at start.
 - Splits are tmux's: `split-window -h` side by side, `-v` (or no flag) one above the other, `kill-pane` closes the pane and the tab with its last pane. A new pane always starts in the active pane's directory, as with the user's `-c "#{pane_current_path}"`; tmux without `-c` would use the session's directory, which nerdr doesn't have.
-- Moving between panes is tmux's: select-pane `-t :.+` (`o`), `-L/-R/-U/-D` (arrows, wrapping to the far side at the edge as tmux does), last-pane (`;`), resize-pane -Z (`z`). Anything that changes the active pane ends a zoom.
+- Moving between panes is tmux's select-pane `-L/-R/-U/-D` (arrows, wrapping to the far side at the edge as tmux does) and resize-pane -Z (`z`). Anything that changes the active pane ends a zoom.
+- `o` and `;` (next and last pane) are left out on purpose: the user doesn't want them, so nerdr has no action for `select-pane -t :.+` or `last-pane` even though tmux binds them.
+- `C-h/j/k/l` come from vim-tmux-navigator's root bindings, `if-shell "ps … | grep -iqE '<pattern>'" "send-keys C-h" "select-pane -L"`. nerdr reads the pattern from the binding and matches it against hc's foreground program of the active pane (`"S <name>"`, standing in for a `ps -o state= -o comm=` line): a match (nvim, fzf …) gets the key, else the pane changes. The plugin's check covers every process on the tty; the foreground program is close enough for vim and fzf. `prefix.rs` (`vim_navigator`).
+- tmux command lines are split as tmux quotes them (`"…"` with escapes, `'…'`, `\` outside quotes): `tokens` in `prefix.rs`.
 - tmux's `-r` works: after a repeatable key, more of them work without the prefix for `repeat-time` (500 ms), read from tmux. Any other key ends it and goes to the program, as in tmux.
-- tmux's root table (`bind -n`) works too: the user's `M-arrows` resize without the prefix. Root bindings nerdr can't run (vim-tmux-navigator's `if-shell` on `C-h/j/k/l`, mouse bindings) are left out, so those keys reach the program.
+- tmux's root table (`bind -n`) works too: the user's `M-arrows` resize without the prefix. Root bindings nerdr can't run (other `if-shell`s, mouse bindings) are left out, so those keys reach the program.
 - tmux 3.8 writes its defaults for `C-`/`M-Up` and `Left` as `if-shell -F "#{?floating_pane_flag}" { floating } { tiled }`. nerdr has no floating panes, so it reads the second block. Without this only Down and Right resized.
 - Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
 

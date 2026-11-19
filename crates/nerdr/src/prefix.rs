@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use gpui::Keystroke;
+use regex::Regex;
 
 use crate::panes::{Dir, Side};
 
@@ -84,9 +85,6 @@ pub enum Action {
     /// tmux's split-window: `-h` side by side, else one above the other.
     Split(Dir),
     ClosePane,
-    NextPane,
-    PrevPane,
-    LastPane,
     SelectPane(Side),
     /// tmux's resize-pane -Z: the active pane fills the tab, and back.
     Zoom,
@@ -162,11 +160,34 @@ pub struct Keys {
 
 type Table = HashMap<String, Binding>;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Binding {
     pub action: Action,
     /// tmux's `-r`: works again without the prefix within `repeat-time`.
     pub repeat: bool,
+    /// The key goes to the program instead when the pane's program matches, as with
+    /// vim-tmux-navigator's `if-shell "ps … | grep -iqE '<pattern>'" "send-keys <key>" …`.
+    pub unless: Option<Regex>,
+}
+
+impl Binding {
+    fn new(action: Action, repeat: bool) -> Self {
+        Binding {
+            action,
+            repeat,
+            unless: None,
+        }
+    }
+
+    /// Whether the key is the program's: `name` is the pane's foreground program.
+    pub fn passes_to(&self, name: Option<&str>) -> bool {
+        // The pattern is written for `ps -o state= -o comm=` lines; a running process
+        // fills in the state
+        match (&self.unless, name) {
+            (Some(re), Some(name)) => re.is_match(&format!("S {name}")),
+            _ => false,
+        }
+    }
 }
 
 impl Keys {
@@ -201,7 +222,10 @@ impl Keys {
         }
         if std::env::var_os("NERDR_DEBUG").is_some() {
             let sorted = |t: &Table| {
-                let mut v: Vec<_> = t.iter().map(|(k, b)| (k.clone(), b.action, b.repeat)).collect();
+                let mut v: Vec<_> = t
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.action, b.repeat, b.unless.as_ref().map(|r| r.to_string())))
+                    .collect();
                 v.sort_by(|a, b| a.0.cmp(&b.0));
                 v
             };
@@ -220,24 +244,19 @@ impl Keys {
     /// What the key after the prefix does: nerdr's own keys, else the tmux table.
     pub fn action(&self, key: &str) -> Option<Binding> {
         if key == "f" {
-            return Some(Binding {
-                action: Action::NewSpace,
-                repeat: false,
-            });
+            return Some(Binding::new(Action::NewSpace, false));
         }
         match &self.table {
-            Some(table) => table.get(key).copied(),
-            None => default_action(key, self.base_index).map(|action| Binding {
-                action,
-                // tmux's defaults: arrows, and resizing with C- and M-arrows
-                repeat: matches!(action, Action::SelectPane(_) | Action::Resize(..)),
-            }),
+            Some(table) => table.get(key).cloned(),
+            // tmux's defaults repeat the arrows, and resizing with C- and M-arrows
+            None => default_action(key, self.base_index)
+                .map(|a| Binding::new(a, matches!(a, Action::SelectPane(_) | Action::Resize(..)))),
         }
     }
 
     /// What a key does without the prefix, from tmux's root table.
-    pub fn root(&self, key: &str) -> Option<Action> {
-        self.root.get(key).map(|b| b.action)
+    pub fn root(&self, key: &str) -> Option<&Binding> {
+        self.root.get(key)
     }
 }
 
@@ -246,7 +265,8 @@ impl Keys {
 fn parse_table(list: &str, base: usize) -> Table {
     let mut table = HashMap::new();
     for line in list.lines() {
-        let mut words = line.split_whitespace();
+        let words = tokens(line);
+        let mut words = words.iter().map(String::as_str);
         if words.next() != Some("bind-key") {
             continue;
         }
@@ -266,27 +286,81 @@ fn parse_table(list: &str, base: usize) -> Table {
             }
         }
         let Some(key) = key else { continue };
-        // list-keys escapes # $ ' ; " ~ { } with a backslash
-        let key = key.strip_prefix('\\').filter(|k| !k.is_empty()).unwrap_or(key);
         let command: Vec<&str> = words.collect();
-        if let Some(action) = command_action(&command, base) {
-            table.insert(key.to_string(), Binding { action, repeat });
+        if let Some(b) = vim_navigator(key, &command, base) {
+            table.insert(key.to_string(), b);
+        } else if let Some(action) = command_action(&command, base) {
+            table.insert(key.to_string(), Binding::new(action, repeat));
         }
     }
     table
+}
+
+/// Splits a tmux command line into words as tmux does: `"…"` with backslash escapes,
+/// `'…'` as is, and a backslash outside quotes escaping the next character (`\;`, `\#`).
+fn tokens(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => out.extend(word.take()),
+            '\\' => word.get_or_insert_default().extend(chars.next()),
+            '"' => {
+                let w = word.get_or_insert_default();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => w.extend(chars.next()),
+                        c => w.push(c),
+                    }
+                }
+            }
+            '\'' => {
+                let w = word.get_or_insert_default();
+                w.extend(chars.by_ref().take_while(|&c| c != '\''));
+            }
+            c => word.get_or_insert_default().push(c),
+        }
+    }
+    out.extend(word);
+    out
+}
+
+/// vim-tmux-navigator's root binding: `if-shell "ps … | grep -iqE '<pattern>'"
+/// "send-keys <the key>" "<command>"`. The command, unless the pane runs a program the
+/// pattern matches (vim, fzf), which then gets the key.
+fn vim_navigator(key: &str, command: &[&str], base: usize) -> Option<Binding> {
+    let ["if-shell", test, then, otherwise] = command else {
+        return None;
+    };
+    let pattern = test.split_once("grep -iqE '")?.1.split('\'').next()?;
+    let then = tokens(then);
+    if then.len() != 2 || then[0] != "send-keys" || then[1] != key {
+        return None;
+    }
+    let otherwise = tokens(otherwise);
+    let otherwise: Vec<&str> = otherwise.iter().map(String::as_str).collect();
+    let action = command_action(&otherwise, base)?;
+    let unless = Regex::new(&format!("(?i){pattern}")).ok()?;
+    Some(Binding {
+        action,
+        repeat: false,
+        unless: Some(unless),
+    })
 }
 
 fn command_action(command: &[&str], base: usize) -> Option<Action> {
     let (name, args) = command.split_first()?;
     // tmux 3.8's defaults for C- and M-Up/Left: `if-shell -F "#{?floating_pane_flag}"
     // { floating } { tiled }`. nerdr has no floating panes, so the second block holds.
-    if *name == "if-shell" && args.first() == Some(&"-F") && args.get(1) == Some(&"\"#{?floating_pane_flag}\"") {
+    if *name == "if-shell" && args.first() == Some(&"-F") && args.get(1) == Some(&"#{?floating_pane_flag}") {
         let rest = &args[2..];
         let close = rest.iter().position(|a| *a == "}")?;
         let tiled = rest.get(close + 1..)?.strip_prefix(&["{"])?.strip_suffix(&["}"])?;
         return command_action(tiled, base);
     }
-    if args.iter().any(|a| *a == "\\;" || a.starts_with('{')) {
+    if args.iter().any(|a| *a == ";" || a.starts_with('{')) {
         return None;
     }
     let has = |flag: &str| args.contains(&flag);
@@ -308,9 +382,6 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
         "select-pane" if has("-R") => Action::SelectPane(Side::Right),
         "select-pane" if has("-U") => Action::SelectPane(Side::Up),
         "select-pane" if has("-D") => Action::SelectPane(Side::Down),
-        "select-pane" if has(":.+") => Action::NextPane,
-        "select-pane" if has(":.-") => Action::PrevPane,
-        "last-pane" => Action::LastPane,
         "resize-pane" if has("-Z") => Action::Zoom,
         "resize-pane" => {
             let (i, side) = args.iter().enumerate().find_map(|(i, a)| {
@@ -351,8 +422,6 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         "x" => Action::ClosePane,
         "%" => Action::Split(Dir::Horizontal),
         "\"" => Action::Split(Dir::Vertical),
-        "o" => Action::NextPane,
-        ";" => Action::LastPane,
         "z" => Action::Zoom,
         "Left" => Action::SelectPane(Side::Left),
         "Right" => Action::SelectPane(Side::Right),
@@ -448,8 +517,8 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
         assert_eq!(act(&t, "h"), Some(Action::Split(Dir::Vertical)));
         assert_eq!(act(&t, "C-f"), Some(Action::SendPrefix));
         assert_eq!(act(&t, "PPage"), Some(Action::ScrollPageUp));
-        assert_eq!(act(&t, ";"), Some(Action::LastPane));
-        assert_eq!(act(&t, "o"), Some(Action::NextPane));
+        assert_eq!(act(&t, ";"), None);
+        assert_eq!(act(&t, "o"), None);
         assert_eq!(act(&t, "Up"), Some(Action::SelectPane(Side::Up)));
         assert_eq!(act(&t, "z"), Some(Action::Zoom));
         assert_eq!(act(&t, "M-Up"), Some(Action::Resize(Side::Up, 5)));
@@ -460,7 +529,7 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
         assert!(t["C-Up"].repeat && !t["X"].repeat);
         let keys = Keys { base_index: 1, table: Some(t), ..Keys::default() };
         assert_eq!(keys.action("f").map(|b| b.action), Some(Action::NewSpace));
-        assert_eq!(keys.action("c"), None);
+        assert!(keys.action("c").is_none());
     }
 
     #[test]
@@ -470,8 +539,29 @@ bind-key  -T root C-h       if-shell "ps -o state= -t '#{pane_tty}'" "send-keys 
 bind-key  -T root MouseDown1Pane select-pane -t = \; send-keys -M
 "##;
         let keys = Keys { root: parse_table(list, 0), ..Keys::default() };
-        assert_eq!(keys.root("M-Left"), Some(Action::Resize(Side::Left, 5)));
-        assert_eq!(keys.root("C-h"), None);
-        assert_eq!(keys.root("MouseDown1Pane"), None);
+        let root = |k: &str| keys.root(k).map(|b| b.action);
+        assert_eq!(root("M-Left"), Some(Action::Resize(Side::Left, 5)));
+        assert_eq!(root("C-h"), None);
+        assert_eq!(root("MouseDown1Pane"), None);
+    }
+
+    #[test]
+    fn tokens_as_tmux_quotes_them() {
+        assert_eq!(tokens(r#"a "b \"c\" d" 'e f' \; \#"#), ["a", r#"b "c" d"#, "e f", ";", "#"]);
+    }
+
+    #[test]
+    fn vim_tmux_navigator_passes_keys_to_vim() {
+        // As `tmux list-keys -T root` prints the plugin's binding
+        let list = r##"bind-key  -T root C-h                       if-shell "ps -o state= -o comm= -t '#{pane_tty}'       | grep -iqE '^[^TXZ ]+ +(\\S+/)?g?\\.?(view|l?n?vim?x?|fzf)(diff)?(-wrapped)?$'" "send-keys 'C-h'" "select-pane -L"
+"##;
+        let keys = Keys { root: parse_table(list, 0), ..Keys::default() };
+        let b = keys.root("C-h").unwrap();
+        assert_eq!(b.action, Action::SelectPane(Side::Left));
+        assert!(b.passes_to(Some("nvim")));
+        assert!(b.passes_to(Some("/opt/homebrew/bin/nvim")));
+        assert!(b.passes_to(Some("fzf")));
+        assert!(!b.passes_to(Some("zsh")));
+        assert!(!b.passes_to(None));
     }
 }

@@ -257,7 +257,7 @@ struct Tab {
     panes: Node<Pane>,
     /// The active pane's address.
     active: String,
-    /// The pane active before it, for tmux's last-pane.
+    /// The pane active before it: where the focus goes back to when the active pane closes.
     last: Option<String>,
     /// tmux's zoom: only the active pane shows.
     zoomed: bool,
@@ -558,22 +558,6 @@ impl Workspace {
             return;
         };
         window.focus(&p.focus_handle(cx));
-    }
-
-    /// tmux's select-pane -t :.+ and :.-, in pane order, wrapping.
-    fn cycle_pane(&mut self, d: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let next = self.active_tab().and_then(|t| {
-            let leaves = t.panes.leaves();
-            let i = leaves.iter().position(|p| p.address == t.active)? as isize;
-            let n = leaves.len() as isize;
-            Some(leaves[(i + d).rem_euclid(n) as usize].address.clone())
-        });
-        self.activate_pane(next, window, cx);
-    }
-
-    fn last_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let last = self.active_tab().and_then(|t| t.last.clone());
-        self.activate_pane(last, window, cx);
     }
 
     fn select_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
@@ -953,9 +937,15 @@ impl Workspace {
                 self.prefix_armed = true;
                 cx.stop_propagation();
                 cx.notify();
-            } else if let Some(a) = self.keys.root(&name) {
-                cx.stop_propagation();
-                self.run(a, window, cx);
+            } else if let Some(b) = self.keys.root(&name) {
+                let program = self
+                    .active_pane()
+                    .and_then(|p| self.info.get(&p.address)?["foreground"]["name"].as_str());
+                if !b.passes_to(program) {
+                    let action = b.action;
+                    cx.stop_propagation();
+                    self.run(action, window, cx);
+                }
             }
             return;
         }
@@ -989,9 +979,6 @@ impl Workspace {
             Action::PrevSpace => self.cycle_space(-1, window, cx),
             Action::Split(dir) => self.split(dir, window, cx),
             Action::ClosePane => self.close_pane(window, cx),
-            Action::NextPane => self.cycle_pane(1, window, cx),
-            Action::PrevPane => self.cycle_pane(-1, window, cx),
-            Action::LastPane => self.last_pane(window, cx),
             Action::SelectPane(side) => self.select_pane(side, window, cx),
             Action::Zoom => self.toggle_zoom(cx),
             Action::Resize(side, cells) => self.resize_pane(side, cells, window, cx),

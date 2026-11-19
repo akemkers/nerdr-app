@@ -23,3 +23,6 @@ input: split and kill-pane as in tmux.
 
 ## [2026-11-19] add | Resizing panes
 input: repeat keys, the root table, and tmux 3.8's floating-pane if-shell defaults.
+
+## [2026-11-19] add | C-hjkl and no o/;
+input: vim-tmux-navigator read from the root table; o and ; dropped on the user's wish.
