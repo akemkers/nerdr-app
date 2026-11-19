@@ -20,3 +20,6 @@ input: prefix and bindings read from the running tmux, and why no tmux server is
 
 ## [2026-11-19] add | Splits
 input: split and kill-pane as in tmux.
+
+## [2026-11-19] add | Resizing panes
+input: repeat keys, the root table, and tmux 3.8's floating-pane if-shell defaults.

@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
@@ -18,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::hc;
 use crate::panes::{Dir, Node, Side};
-use crate::prefix::{self, Action, Keys};
+use crate::prefix::{self, Action, Binding, Keys};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
 
@@ -300,6 +301,10 @@ pub struct Workspace {
     keys: Keys,
     /// The prefix was pressed; the next key is a command.
     prefix_armed: bool,
+    /// Until then a repeatable key works without the prefix.
+    repeat_until: Option<Instant>,
+    /// A line between panes being dragged: its tab and the path to its split.
+    drag: Option<(u64, Vec<bool>)>,
     /// The scale `metrics` and `display` were made for.
     scale: f32,
     _tasks: Vec<Task<()>>,
@@ -340,6 +345,8 @@ impl Workspace {
             window_title: Rc::default(),
             keys: Keys::load(),
             prefix_armed: false,
+            repeat_until: None,
+            drag: None,
             scale: window.scale_factor(),
             _tasks: vec![feed],
             _subs: vec![cx.observe_window_bounds(window, Self::on_bounds)],
@@ -575,6 +582,65 @@ impl Workspace {
             Some(p.address.clone())
         });
         self.activate_pane(next, window, cx);
+    }
+
+    /// Where panes go: beside the sidebar, the whole height.
+    fn pane_area(&self, window: &Window) -> (f32, f32) {
+        let vp = window.viewport_size();
+        (f32::from(vp.width) - SIDEBAR_W, f32::from(vp.height))
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let s = self.spaces.get_mut(self.active)?;
+        s.tabs.get_mut(s.active)
+    }
+
+    fn resize_pane(&mut self, side: Side, cells: u16, window: &mut Window, cx: &mut Context<Self>) {
+        let area = self.pane_area(window);
+        let cell = match side {
+            Side::Left | Side::Right => self.metrics.cell_w,
+            Side::Up | Side::Down => self.metrics.cell_h,
+        };
+        let Some(t) = self.active_tab_mut() else {
+            return;
+        };
+        let active = t.active.clone();
+        t.zoomed = false;
+        if t.panes.resize(&|p: &Pane| p.address == active, side, cells as f32 * cell, area) {
+            self.save(cx);
+            cx.notify();
+        }
+    }
+
+    /// The dragged line follows the mouse.
+    fn on_drag(&mut self, ev: &gpui::MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, path)) = self.drag.clone() else {
+            return;
+        };
+        if ev.pressed_button != Some(gpui::MouseButton::Left) {
+            self.end_drag(cx);
+            return;
+        }
+        let (w, h) = self.pane_area(window);
+        let (fx, fy) = ((f32::from(ev.position.x) - SIDEBAR_W) / w, f32::from(ev.position.y) / h);
+        let Some(t) = self.active_tab_mut().filter(|t| t.id == id) else {
+            return;
+        };
+        let Some((dir, r)) = t.panes.split_at(&path) else {
+            return;
+        };
+        let ratio = match dir {
+            Dir::Horizontal => (fx - r.x) / r.w,
+            Dir::Vertical => (fy - r.y) / r.h,
+        };
+        t.panes.set_ratio(&path, ratio);
+        cx.notify();
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            self.save(cx);
+        }
     }
 
     fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
@@ -867,33 +933,47 @@ impl Workspace {
         cx.notify();
     }
 
-    /// tmux-style: the prefix arms, the next key is the command. Every other key goes to
-    /// the terminal.
+    /// tmux-style: the prefix arms, the next key is the command. After a repeatable one
+    /// (`bind -r`) more of them work without the prefix for `repeat-time`. Root-table keys
+    /// (`bind -n`) act straight away. Every other key goes to the terminal.
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
+        // A lone modifier (shift for `&`) doesn't end a wait
+        if matches!(k.key.as_str(), "shift" | "control" | "alt" | "platform" | "function") {
+            return;
+        }
+        let name = prefix::key_name(k);
         if !self.prefix_armed {
-            if self.keys.prefix.matches(k) {
+            let repeating = self.repeat_until.take().is_some_and(|t| Instant::now() < t);
+            let binding = self.keys.action(&name).filter(|b| b.repeat && repeating);
+            if let Some(b) = binding {
+                cx.stop_propagation();
+                self.run_binding(b, window, cx);
+            } else if self.keys.prefix.matches(k) {
                 self.prefix_armed = true;
                 cx.stop_propagation();
                 cx.notify();
+            } else if let Some(a) = self.keys.root(&name) {
+                cx.stop_propagation();
+                self.run(a, window, cx);
             }
-            return;
-        }
-        // A lone modifier (shift for `&`) doesn't end the wait
-        if matches!(k.key.as_str(), "shift" | "control" | "alt" | "platform" | "function") {
             return;
         }
         self.prefix_armed = false;
         cx.stop_propagation();
         cx.notify();
-        let action = if self.keys.prefix.matches(k) {
-            Some(Action::SendPrefix)
-        } else {
-            self.keys.action(&prefix::key_name(k))
-        };
-        if let Some(a) = action {
-            self.run(a, window, cx);
+        if self.keys.prefix.matches(k) {
+            self.run(Action::SendPrefix, window, cx);
+        } else if let Some(b) = self.keys.action(&name) {
+            self.run_binding(b, window, cx);
         }
+    }
+
+    fn run_binding(&mut self, b: Binding, window: &mut Window, cx: &mut Context<Self>) {
+        if b.repeat {
+            self.repeat_until = Some(Instant::now() + self.keys.repeat_time);
+        }
+        self.run(b.action, window, cx);
     }
 
     fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -914,6 +994,7 @@ impl Workspace {
             Action::LastPane => self.last_pane(window, cx),
             Action::SelectPane(side) => self.select_pane(side, window, cx),
             Action::Zoom => self.toggle_zoom(cx),
+            Action::Resize(side, cells) => self.resize_pane(side, cells, window, cx),
             Action::ScrollPageUp => {
                 if let Some(p) = self.active_pane() {
                     p.view.update(cx, |v, cx| v.scroll_pages(1, cx));
@@ -963,6 +1044,58 @@ impl Workspace {
                 }
             })
             .unwrap_or_else(|| "space".into())
+    }
+
+    /// Panes as tmux draws them with lines between: the lines next to the active pane are
+    /// lit, and a line can be dragged. `path` leads from the tab's root to `node`.
+    fn render_panes(&self, tab: &Tab, node: &Node<Pane>, path: Vec<bool>, cx: &mut Context<Self>) -> AnyElement {
+        let (split, ratio, a, b) = match node {
+            Node::Leaf(p) => {
+                return div().size_full().overflow_hidden().child(p.view.clone()).into_any_element();
+            }
+            Node::Split { split, ratio, a, b } => (*split, *ratio, a, b),
+        };
+        let is_active = |p: &Pane| p.address == tab.active;
+        let lit = a.contains(&is_active) || b.contains(&is_active);
+        let line = hsla(if lit { theme::YELLOW } else { theme::PANE_BORDER });
+        let child = |second: bool| {
+            let mut p = path.clone();
+            p.push(second);
+            p
+        };
+        let first = self.render_panes(tab, a, child(false), cx);
+        let second = self.render_panes(tab, b, child(true), cx);
+        let first = div().flex_none().overflow_hidden().child(first);
+        let second = div().flex_1().min_w(px(0.)).min_h(px(0.)).overflow_hidden().child(second);
+        // The line is 1 px; the grab area reaches 4 px into the first pane, which is painted
+        // before the line, so the area stays on top
+        let grab = div().absolute().id(gpui::ElementId::Name(format!("line-{}-{path:?}", tab.id).into()));
+        let grab = match split {
+            Dir::Horizontal => grab.top_0().bottom_0().left(px(-4.)).w(px(5.)).cursor_col_resize(),
+            Dir::Vertical => grab.left_0().right_0().top(px(-4.)).h(px(5.)).cursor_row_resize(),
+        };
+        let id = tab.id;
+        let grab = grab.on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                this.drag = Some((id, path.clone()));
+                cx.stop_propagation();
+            }),
+        );
+        let row = div().size_full().flex();
+        match split {
+            Dir::Horizontal => row
+                .flex_row()
+                .child(first.h_full().w(relative(ratio)))
+                .child(div().relative().flex_none().w(px(1.)).h_full().bg(line).child(grab))
+                .child(second.h_full()),
+            Dir::Vertical => row
+                .flex_col()
+                .child(first.w_full().h(relative(ratio)))
+                .child(div().relative().flex_none().h(px(1.)).w_full().bg(line).child(grab))
+                .child(second.w_full()),
+        }
+        .into_any_element()
     }
 
     /// The most urgent agent status (OSC 7501) among a tab's panes, as a color.
@@ -1075,49 +1208,13 @@ impl Focusable for Workspace {
     }
 }
 
-/// Panes as tmux draws them with lines between: the lines next to the active pane are lit.
-fn render_panes(node: &Node<Pane>, active: &str) -> AnyElement {
-    match node {
-        Node::Leaf(p) => div()
-            .size_full()
-            .overflow_hidden()
-            .child(p.view.clone())
-            .into_any_element(),
-        Node::Split { split, ratio, a, b } => {
-            let is_active = |p: &Pane| p.address == active;
-            let lit = a.contains(&is_active) || b.contains(&is_active);
-            let line = hsla(if lit { theme::YELLOW } else { theme::PANE_BORDER });
-            let first = div().flex_none().overflow_hidden().child(render_panes(a, active));
-            let second = div().flex_1().min_w(px(0.)).min_h(px(0.)).overflow_hidden();
-            let second = second.child(render_panes(b, active));
-            let row = div().size_full().flex();
-            match split {
-                Dir::Horizontal => row
-                    .flex_row()
-                    .child(first.h_full().w(relative(*ratio)))
-                    .child(div().flex_none().w(px(1.)).h_full().bg(line))
-                    .child(second.h_full()),
-                Dir::Vertical => row
-                    .flex_col()
-                    .child(first.w_full().h(relative(*ratio)))
-                    .child(div().flex_none().h(px(1.)).w_full().bg(line))
-                    .child(second.w_full()),
-            }
-            .into_any_element()
-        }
-    }
-}
-
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let main = div()
-            .flex_1()
-            .h_full()
-            .overflow_hidden()
-            .children(self.active_tab().map(|t| match t.active_pane() {
-                Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
-                _ => render_panes(&t.panes, &t.active),
-            }));
+        let panes = self.active_tab().map(|t| match t.active_pane() {
+            Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
+            _ => self.render_panes(t, &t.panes, Vec::new(), cx),
+        });
+        let main = div().flex_1().h_full().overflow_hidden().children(panes);
         div()
             .size_full()
             .flex()
@@ -1125,6 +1222,8 @@ impl Render for Workspace {
             .bg(hsla(theme::BG))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key))
+            .on_mouse_move(cx.listener(Self::on_drag))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .child(self.render_sidebar(cx))
             .child(main)
     }

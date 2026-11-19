@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::process::Command;
+use std::time::Duration;
 
 use gpui::Keystroke;
 
@@ -89,6 +90,8 @@ pub enum Action {
     SelectPane(Side),
     /// tmux's resize-pane -Z: the active pane fills the tab, and back.
     Zoom,
+    /// tmux's resize-pane -L/-R/-U/-D: that many cells.
+    Resize(Side, u16),
     NewSpace,
     NextSpace,
     PrevSpace,
@@ -150,7 +153,20 @@ pub struct Keys {
     /// tmux's `base-index`: the number of the first tab.
     pub base_index: usize,
     /// tmux's prefix table, mapped to what nerdr can do. `None`: no tmux, use the defaults.
-    table: Option<HashMap<String, Action>>,
+    table: Option<Table>,
+    /// tmux's root table: keys that act without the prefix (`bind -n`).
+    root: Table,
+    /// tmux's `repeat-time`: how long a repeatable key (`bind -r`) works without the prefix.
+    pub repeat_time: Duration,
+}
+
+type Table = HashMap<String, Binding>;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Binding {
+    pub action: Action,
+    /// tmux's `-r`: works again without the prefix within `repeat-time`.
+    pub repeat: bool,
 }
 
 impl Keys {
@@ -161,46 +177,73 @@ impl Keys {
             let out = Command::new("tmux").args(args).output().ok()?;
             out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
         };
-        let mut keys = Keys::default();
+        let mut keys = Keys {
+            repeat_time: Duration::from_millis(500),
+            ..Keys::default()
+        };
         if let Some(p) = tmux(&["show-options", "-gv", "prefix"]).and_then(|p| Prefix::parse(&p)) {
             keys.prefix = p;
         }
         if let Some(b) = tmux(&["show-options", "-gv", "base-index"]).and_then(|b| b.trim().parse().ok()) {
             keys.base_index = b;
         }
+        if let Some(ms) = tmux(&["show-options", "-gv", "repeat-time"]).and_then(|m| m.trim().parse().ok()) {
+            keys.repeat_time = Duration::from_millis(ms);
+        }
         if let Some(list) = tmux(&["list-keys", "-T", "prefix"]) {
             keys.table = Some(parse_table(&list, keys.base_index));
+        }
+        if let Some(list) = tmux(&["list-keys", "-T", "root"]) {
+            keys.root = parse_table(&list, keys.base_index);
         }
         if let Some(p) = std::env::var(PREFIX_VAR).ok().and_then(|p| Prefix::parse(&p)) {
             keys.prefix = p;
         }
         if std::env::var_os("NERDR_DEBUG").is_some() {
-            let mut bound: Vec<_> = keys.table.iter().flatten().collect();
-            bound.sort_by(|a, b| a.0.cmp(b.0));
+            let sorted = |t: &Table| {
+                let mut v: Vec<_> = t.iter().map(|(k, b)| (k.clone(), b.action, b.repeat)).collect();
+                v.sort_by(|a, b| a.0.cmp(&b.0));
+                v
+            };
             eprintln!(
-                "nerdr: prefix {}, base-index {}, tmux bindings {bound:?}",
+                "nerdr: prefix {}, base-index {}, repeat-time {:?}, tmux prefix table {:?}, root table {:?}",
                 keys.prefix.name(),
-                keys.base_index
+                keys.base_index,
+                keys.repeat_time,
+                keys.table.as_ref().map(sorted),
+                sorted(&keys.root),
             );
         }
         keys
     }
 
     /// What the key after the prefix does: nerdr's own keys, else the tmux table.
-    pub fn action(&self, key: &str) -> Option<Action> {
+    pub fn action(&self, key: &str) -> Option<Binding> {
         if key == "f" {
-            return Some(Action::NewSpace);
+            return Some(Binding {
+                action: Action::NewSpace,
+                repeat: false,
+            });
         }
         match &self.table {
             Some(table) => table.get(key).copied(),
-            None => default_action(key, self.base_index),
+            None => default_action(key, self.base_index).map(|action| Binding {
+                action,
+                // tmux's defaults: arrows, and resizing with C- and M-arrows
+                repeat: matches!(action, Action::SelectPane(_) | Action::Resize(..)),
+            }),
         }
+    }
+
+    /// What a key does without the prefix, from tmux's root table.
+    pub fn root(&self, key: &str) -> Option<Action> {
+        self.root.get(key).map(|b| b.action)
     }
 }
 
 /// `tmux list-keys -T prefix` to actions. Lines whose command nerdr has no action for
 /// (panes, menus, prompts, chains) are left out, so those keys do nothing yet.
-fn parse_table(list: &str, base: usize) -> HashMap<String, Action> {
+fn parse_table(list: &str, base: usize) -> Table {
     let mut table = HashMap::new();
     for line in list.lines() {
         let mut words = line.split_whitespace();
@@ -208,9 +251,11 @@ fn parse_table(list: &str, base: usize) -> HashMap<String, Action> {
             continue;
         }
         let mut key = None;
+        let mut repeat = false;
         while let Some(w) = words.next() {
             match w {
-                "-r" | "-n" => {}
+                "-r" => repeat = true,
+                "-n" => {}
                 "-T" | "-N" => {
                     words.next();
                 }
@@ -224,8 +269,8 @@ fn parse_table(list: &str, base: usize) -> HashMap<String, Action> {
         // list-keys escapes # $ ' ; " ~ { } with a backslash
         let key = key.strip_prefix('\\').filter(|k| !k.is_empty()).unwrap_or(key);
         let command: Vec<&str> = words.collect();
-        if let Some(a) = command_action(&command, base) {
-            table.insert(key.to_string(), a);
+        if let Some(action) = command_action(&command, base) {
+            table.insert(key.to_string(), Binding { action, repeat });
         }
     }
     table
@@ -233,6 +278,14 @@ fn parse_table(list: &str, base: usize) -> HashMap<String, Action> {
 
 fn command_action(command: &[&str], base: usize) -> Option<Action> {
     let (name, args) = command.split_first()?;
+    // tmux 3.8's defaults for C- and M-Up/Left: `if-shell -F "#{?floating_pane_flag}"
+    // { floating } { tiled }`. nerdr has no floating panes, so the second block holds.
+    if *name == "if-shell" && args.first() == Some(&"-F") && args.get(1) == Some(&"\"#{?floating_pane_flag}\"") {
+        let rest = &args[2..];
+        let close = rest.iter().position(|a| *a == "}")?;
+        let tiled = rest.get(close + 1..)?.strip_prefix(&["{"])?.strip_suffix(&["}"])?;
+        return command_action(tiled, base);
+    }
     if args.iter().any(|a| *a == "\\;" || a.starts_with('{')) {
         return None;
     }
@@ -259,6 +312,20 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
         "select-pane" if has(":.-") => Action::PrevPane,
         "last-pane" => Action::LastPane,
         "resize-pane" if has("-Z") => Action::Zoom,
+        "resize-pane" => {
+            let (i, side) = args.iter().enumerate().find_map(|(i, a)| {
+                let side = match *a {
+                    "-L" => Side::Left,
+                    "-R" => Side::Right,
+                    "-U" => Side::Up,
+                    "-D" => Side::Down,
+                    _ => return None,
+                };
+                Some((i, side))
+            })?;
+            let n = args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(1);
+            Action::Resize(side, n)
+        }
         "switch-client" if has("-n") => Action::NextSpace,
         "switch-client" if has("-p") => Action::PrevSpace,
         "detach-client" => Action::Quit,
@@ -291,6 +358,14 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         "Right" => Action::SelectPane(Side::Right),
         "Up" => Action::SelectPane(Side::Up),
         "Down" => Action::SelectPane(Side::Down),
+        "C-Left" => Action::Resize(Side::Left, 1),
+        "C-Right" => Action::Resize(Side::Right, 1),
+        "C-Up" => Action::Resize(Side::Up, 1),
+        "C-Down" => Action::Resize(Side::Down, 1),
+        "M-Left" => Action::Resize(Side::Left, 5),
+        "M-Right" => Action::Resize(Side::Right, 5),
+        "M-Up" => Action::Resize(Side::Up, 5),
+        "M-Down" => Action::Resize(Side::Down, 5),
         ")" => Action::NextSpace,
         "(" => Action::PrevSpace,
         "PPage" => Action::ScrollPageUp,
@@ -352,6 +427,9 @@ bind-key    -T prefix x       kill-pane
 bind-key    -T prefix o       select-pane -t :.+
 bind-key    -T prefix Up      select-pane -U
 bind-key    -T prefix z       resize-pane -Z
+bind-key -r -T prefix C-Up    resize-pane -U
+bind-key -r -T prefix M-Down  resize-pane -D 5
+bind-key -r -T prefix M-Up    if-shell -F "#{?floating_pane_flag}" { resize-pane -D -5 } { resize-pane -U 5 }
 bind-key    -T prefix v       split-window -h -c "#{pane_current_path}"
 bind-key    -T prefix h       split-window -v -c "#{pane_current_path}"
 bind-key    -T prefix f       command-prompt { find-window -Z "%%" }
@@ -360,23 +438,40 @@ bind-key    -T prefix PPage   copy-mode -u
 bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloaded"
 "##;
         let t = parse_table(list, 1);
-        assert_eq!(t.get("("), Some(&Action::PrevSpace));
-        assert_eq!(t.get("1"), Some(&Action::SelectTab(0)));
-        assert_eq!(t.get("&"), Some(&Action::CloseTab));
-        assert_eq!(t.get("X"), Some(&Action::CloseTab));
-        assert_eq!(t.get("x"), Some(&Action::ClosePane));
-        assert_eq!(t.get("v"), Some(&Action::Split(Dir::Horizontal)));
-        assert_eq!(t.get("h"), Some(&Action::Split(Dir::Vertical)));
-        assert_eq!(t.get("C-f"), Some(&Action::SendPrefix));
-        assert_eq!(t.get("PPage"), Some(&Action::ScrollPageUp));
-        assert_eq!(t.get(";"), Some(&Action::LastPane));
-        assert_eq!(t.get("o"), Some(&Action::NextPane));
-        assert_eq!(t.get("Up"), Some(&Action::SelectPane(Side::Up)));
-        assert_eq!(t.get("z"), Some(&Action::Zoom));
-        assert_eq!(t.get("f"), None);
-        assert_eq!(t.get("r"), None);
-        let keys = Keys { prefix: Prefix::default(), base_index: 1, table: Some(t) };
-        assert_eq!(keys.action("f"), Some(Action::NewSpace));
+        let act = |t: &Table, k: &str| t.get(k).map(|b| b.action);
+        assert_eq!(act(&t, "("), Some(Action::PrevSpace));
+        assert_eq!(act(&t, "1"), Some(Action::SelectTab(0)));
+        assert_eq!(act(&t, "&"), Some(Action::CloseTab));
+        assert_eq!(act(&t, "X"), Some(Action::CloseTab));
+        assert_eq!(act(&t, "x"), Some(Action::ClosePane));
+        assert_eq!(act(&t, "v"), Some(Action::Split(Dir::Horizontal)));
+        assert_eq!(act(&t, "h"), Some(Action::Split(Dir::Vertical)));
+        assert_eq!(act(&t, "C-f"), Some(Action::SendPrefix));
+        assert_eq!(act(&t, "PPage"), Some(Action::ScrollPageUp));
+        assert_eq!(act(&t, ";"), Some(Action::LastPane));
+        assert_eq!(act(&t, "o"), Some(Action::NextPane));
+        assert_eq!(act(&t, "Up"), Some(Action::SelectPane(Side::Up)));
+        assert_eq!(act(&t, "z"), Some(Action::Zoom));
+        assert_eq!(act(&t, "M-Up"), Some(Action::Resize(Side::Up, 5)));
+        assert_eq!(act(&t, "f"), None);
+        assert_eq!(act(&t, "r"), None);
+        assert_eq!(act(&t, "C-Up"), Some(Action::Resize(Side::Up, 1)));
+        assert_eq!(act(&t, "M-Down"), Some(Action::Resize(Side::Down, 5)));
+        assert!(t["C-Up"].repeat && !t["X"].repeat);
+        let keys = Keys { base_index: 1, table: Some(t), ..Keys::default() };
+        assert_eq!(keys.action("f").map(|b| b.action), Some(Action::NewSpace));
         assert_eq!(keys.action("c"), None);
+    }
+
+    #[test]
+    fn root_table_acts_without_the_prefix() {
+        let list = r##"bind-key  -T root M-Left    resize-pane -L 5
+bind-key  -T root C-h       if-shell "ps -o state= -t '#{pane_tty}'" "send-keys 'C-h'" "select-pane -L"
+bind-key  -T root MouseDown1Pane select-pane -t = \; send-keys -M
+"##;
+        let keys = Keys { root: parse_table(list, 0), ..Keys::default() };
+        assert_eq!(keys.root("M-Left"), Some(Action::Resize(Side::Left, 5)));
+        assert_eq!(keys.root("C-h"), None);
+        assert_eq!(keys.root("MouseDown1Pane"), None);
     }
 }

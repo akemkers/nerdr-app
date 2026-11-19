@@ -31,6 +31,9 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - `NERDR_DEBUG=1` logs the prefix, base-index and the mapped bindings at start.
 - Splits are tmux's: `split-window -h` side by side, `-v` (or no flag) one above the other, `kill-pane` closes the pane and the tab with its last pane. A new pane always starts in the active pane's directory, as with the user's `-c "#{pane_current_path}"`; tmux without `-c` would use the session's directory, which nerdr doesn't have.
 - Moving between panes is tmux's: select-pane `-t :.+` (`o`), `-L/-R/-U/-D` (arrows, wrapping to the far side at the edge as tmux does), last-pane (`;`), resize-pane -Z (`z`). Anything that changes the active pane ends a zoom.
+- tmux's `-r` works: after a repeatable key, more of them work without the prefix for `repeat-time` (500 ms), read from tmux. Any other key ends it and goes to the program, as in tmux.
+- tmux's root table (`bind -n`) works too: the user's `M-arrows` resize without the prefix. Root bindings nerdr can't run (vim-tmux-navigator's `if-shell` on `C-h/j/k/l`, mouse bindings) are left out, so those keys reach the program.
+- tmux 3.8 writes its defaults for `C-`/`M-Up` and `Left` as `if-shell -F "#{?floating_pane_flag}" { floating } { tiled }`. nerdr has no floating panes, so it reads the second block. Without this only Down and Right resized.
 - Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
 
 ## Mouse and clipboard

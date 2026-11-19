@@ -52,6 +52,22 @@ pub enum Side {
 
 /// Slack for edges that meet after float arithmetic.
 const EPS: f32 = 1e-4;
+/// The smallest share a pane can be given by resizing.
+const MIN_RATIO: f32 = 0.05;
+
+/// The two halves of a split rectangle.
+fn halves(split: Dir, ratio: f32, r: Rect) -> (Rect, Rect) {
+    match split {
+        Dir::Horizontal => (
+            Rect { w: r.w * ratio, ..r },
+            Rect { x: r.x + r.w * ratio, w: r.w * (1. - ratio), ..r },
+        ),
+        Dir::Vertical => (
+            Rect { h: r.h * ratio, ..r },
+            Rect { y: r.y + r.h * ratio, h: r.h * (1. - ratio), ..r },
+        ),
+    }
+}
 
 impl<L> Node<L> {
     /// In tmux's pane order: left before right, top before bottom.
@@ -147,16 +163,7 @@ impl<L> Node<L> {
         match self {
             Node::Leaf(l) => out.push((l, r)),
             Node::Split { split, ratio, a, b } => {
-                let (ra, rb) = match split {
-                    Dir::Horizontal => (
-                        Rect { w: r.w * ratio, ..r },
-                        Rect { x: r.x + r.w * ratio, w: r.w * (1. - ratio), ..r },
-                    ),
-                    Dir::Vertical => (
-                        Rect { h: r.h * ratio, ..r },
-                        Rect { y: r.y + r.h * ratio, h: r.h * (1. - ratio), ..r },
-                    ),
-                };
+                let (ra, rb) = halves(*split, *ratio, r);
                 a.rects_in(ra, out);
                 b.rects_in(rb, out);
             }
@@ -200,6 +207,78 @@ impl<L> Node<L> {
             }
         }
         near.or(wrap).map(|(l, _)| l)
+    }
+
+    /// tmux's resize-pane: moves the nearest line on that axis around the pane `is`
+    /// picks, `px` towards `side`. `area` is the tab's size in pixels.
+    pub fn resize(&mut self, is: &impl Fn(&L) -> bool, side: Side, px: f32, area: (f32, f32)) -> bool {
+        self.resize_in(FULL, is, side, px, area)
+    }
+
+    fn resize_in(
+        &mut self,
+        r: Rect,
+        is: &impl Fn(&L) -> bool,
+        side: Side,
+        px: f32,
+        area: (f32, f32),
+    ) -> bool {
+        let Node::Split { split, ratio, a, b } = self else {
+            return false;
+        };
+        let (ra, rb) = halves(*split, *ratio, r);
+        let inner = if a.contains(is) {
+            a.resize_in(ra, is, side, px, area)
+        } else if b.contains(is) {
+            b.resize_in(rb, is, side, px, area)
+        } else {
+            return false;
+        };
+        if inner {
+            return true;
+        }
+        let (extent, sign) = match (*split, side) {
+            (Dir::Horizontal, Side::Left) => (r.w * area.0, -1.),
+            (Dir::Horizontal, Side::Right) => (r.w * area.0, 1.),
+            (Dir::Vertical, Side::Up) => (r.h * area.1, -1.),
+            (Dir::Vertical, Side::Down) => (r.h * area.1, 1.),
+            _ => return false,
+        };
+        if extent <= 0. {
+            return false;
+        }
+        *ratio = (*ratio + sign * px / extent).clamp(MIN_RATIO, 1. - MIN_RATIO);
+        true
+    }
+
+    /// The split at `path` (false: first half, true: second), with its place in the tab.
+    pub fn split_at(&self, path: &[bool]) -> Option<(Dir, Rect)> {
+        let mut node = self;
+        let mut r = FULL;
+        for &second in path {
+            let Node::Split { split, ratio, a, b } = node else {
+                return None;
+            };
+            let (ra, rb) = halves(*split, *ratio, r);
+            (node, r) = if second { (&**b, rb) } else { (&**a, ra) };
+        }
+        match node {
+            Node::Split { split, .. } => Some((*split, r)),
+            Node::Leaf(_) => None,
+        }
+    }
+
+    pub fn set_ratio(&mut self, path: &[bool], to: f32) {
+        let mut node = self;
+        for &second in path {
+            let Node::Split { a, b, .. } = node else {
+                return;
+            };
+            node = if second { b } else { a };
+        }
+        if let Node::Split { ratio, .. } = node {
+            *ratio = to.clamp(MIN_RATIO, 1. - MIN_RATIO);
+        }
     }
 
     pub fn map<M>(&self, f: &impl Fn(&L) -> M) -> Node<M> {
@@ -285,6 +364,27 @@ mod tests {
         assert_eq!(at("t2", Side::Up), Some("t3"));
         // Nothing above or below t1
         assert_eq!(at("t1", Side::Up), None);
+    }
+
+    #[test]
+    fn resize_moves_the_nearest_line_on_the_axis() {
+        // t1 | t2
+        //    | t3
+        let n = split(leaf("t1"), "t1", Dir::Horizontal, "t2");
+        let mut n = split(n, "t2", Dir::Vertical, "t3");
+        let area = (1000., 500.);
+        // t3 left: the vertical line between t1 and the right side moves 100 px of 1000
+        assert!(n.resize(&is("t3"), Side::Left, 100., area));
+        assert!((n.rects()[0].1.w - 0.4).abs() < 1e-5);
+        // t3 up: the line between t2 and t3, 50 px of the 500 px column
+        assert!(n.resize(&is("t3"), Side::Up, 50., area));
+        assert!((n.rects()[1].1.h - 0.4).abs() < 1e-5);
+        // No horizontal line above t1
+        assert!(!n.resize(&is("t1"), Side::Up, 50., area));
+        assert_eq!(n.split_at(&[]).map(|(d, _)| d), Some(Dir::Horizontal));
+        assert_eq!(n.split_at(&[true]).map(|(d, r)| (d, r.x)), Some((Dir::Vertical, 0.4)));
+        n.set_ratio(&[true], 2.);
+        assert!((n.rects()[1].1.h - (1. - MIN_RATIO)).abs() < 1e-5);
     }
 
     #[test]
