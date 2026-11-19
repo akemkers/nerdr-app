@@ -1038,13 +1038,15 @@ impl Workspace {
     fn render_panes(&self, tab: &Tab, node: &Node<Pane>, path: Vec<bool>, cx: &mut Context<Self>) -> AnyElement {
         let (split, ratio, a, b) = match node {
             Node::Leaf(p) => {
-                return div().size_full().overflow_hidden().child(p.view.clone()).into_any_element();
+                let leaf = div().relative().size_full().overflow_hidden().child(p.view.clone());
+                return match (p.address == tab.active).then(|| active_frame(tab)).flatten() {
+                    Some(frame) => leaf.child(frame).into_any_element(),
+                    None => leaf.into_any_element(),
+                };
             }
             Node::Split { split, ratio, a, b } => (*split, *ratio, a, b),
         };
-        let is_active = |p: &Pane| p.address == tab.active;
-        let lit = a.contains(&is_active) || b.contains(&is_active);
-        let line = hsla(if lit { theme::YELLOW } else { theme::PANE_BORDER });
+        let line = hsla(theme::PANE_BORDER);
         let child = |second: bool| {
             let mut p = path.clone();
             p.push(second);
@@ -1187,6 +1189,39 @@ impl Workspace {
         col.child(div().flex_1())
             .child(div().flex_none().flex().mx(px(10.)).mt(px(10.)).child(badge))
     }
+}
+
+/// A yellow frame over the dividers around the active pane. Deferred so it paints on top
+/// of the dividers and outside the pane's clip; none on the tab's outer edges.
+fn active_frame(tab: &Tab) -> Option<AnyElement> {
+    let rects = tab.panes.rects();
+    if rects.len() < 2 {
+        return None;
+    }
+    let (_, r) = rects.into_iter().find(|(p, _)| p.address == tab.active)?;
+    let (left, top) = (r.x > 1e-4, r.y > 1e-4);
+    let (right, bottom) = (r.x + r.w < 1. - 1e-4, r.y + r.h < 1. - 1e-4);
+    let out = |on: bool| px(if on { -1. } else { 0. });
+    let mut frame = div()
+        .absolute()
+        .left(out(left))
+        .top(out(top))
+        .right(out(right))
+        .bottom(out(bottom))
+        .border_color(hsla(theme::YELLOW));
+    if left {
+        frame = frame.border_l_1();
+    }
+    if top {
+        frame = frame.border_t_1();
+    }
+    if right {
+        frame = frame.border_r_1();
+    }
+    if bottom {
+        frame = frame.border_b_1();
+    }
+    Some(gpui::deferred(frame).into_any_element())
 }
 
 impl Focusable for Workspace {

@@ -26,3 +26,6 @@ input: repeat keys, the root table, and tmux 3.8's floating-pane if-shell defaul
 
 ## [2026-11-19] add | C-hjkl and no o/;
 input: vim-tmux-navigator read from the root table; o and ; dropped on the user's wish.
+
+## [2026-11-19] fix | active pane frame
+gpui: deferred escapes clipping and paints on top. Lines no longer light up per split, which lit every ancestor split.
