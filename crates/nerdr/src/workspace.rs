@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::hc;
-use crate::prefix::{self, Action, Prefix};
+use crate::prefix::{self, Action, Keys};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
 
@@ -225,9 +225,7 @@ pub struct Workspace {
     save_again: bool,
     focus: FocusHandle,
     window_title: Rc<RefCell<String>>,
-    prefix: Prefix,
-    /// tmux's `base-index`: the number of the first tab.
-    base_index: usize,
+    keys: Keys,
     /// The prefix was pressed; the next key is a command.
     prefix_armed: bool,
     /// The scale `metrics` and `display` were made for.
@@ -268,8 +266,7 @@ impl Workspace {
             save_again: false,
             focus: cx.focus_handle(),
             window_title: Rc::default(),
-            prefix: Prefix::default(),
-            base_index: 0,
+            keys: Keys::load(),
             prefix_armed: false,
             scale: window.scale_factor(),
             _tasks: vec![feed],
@@ -611,7 +608,7 @@ impl Workspace {
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         if !self.prefix_armed {
-            if self.prefix.matches(k) {
+            if self.keys.prefix.matches(k) {
                 self.prefix_armed = true;
                 cx.stop_propagation();
                 cx.notify();
@@ -625,10 +622,10 @@ impl Workspace {
         self.prefix_armed = false;
         cx.stop_propagation();
         cx.notify();
-        let action = if self.prefix.matches(k) {
+        let action = if self.keys.prefix.matches(k) {
             Some(Action::SendPrefix)
         } else {
-            prefix::default_action(&prefix::key_name(k), self.base_index)
+            self.keys.action(&prefix::key_name(k))
         };
         if let Some(a) = action {
             self.run(a, window, cx);
@@ -652,7 +649,7 @@ impl Workspace {
                 }
             }
             Action::SendPrefix => {
-                let ks = self.prefix.keystroke();
+                let ks = self.keys.prefix.keystroke();
                 if let Some(t) = self.active_tab() {
                     t.view.update(cx, |v, cx| v.type_keystroke(&ks, cx));
                 }
@@ -759,7 +756,7 @@ impl Workspace {
                             .rounded(px(4.))
                             .when_some(dot, |d, c| d.bg(c)),
                     )
-                    .child(div().flex_none().child((self.base_index + ti).to_string()))
+                    .child(div().flex_none().child((self.keys.base_index + ti).to_string()))
                     .child(
                         div()
                             .flex_1()
@@ -781,7 +778,7 @@ impl Workspace {
             .rounded(px(4.))
             .text_color(if armed { hsla(theme::SIDEBAR_BG) } else { dim })
             .when(armed, |d| d.bg(hsla(theme::RED)))
-            .child(self.prefix.name());
+            .child(self.keys.prefix.name());
         col.child(div().flex_1())
             .child(div().flex_none().flex().mx(px(10.)).mt(px(10.)).child(badge))
     }

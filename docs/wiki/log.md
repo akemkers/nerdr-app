@@ -14,3 +14,6 @@ New page daily-use. hc and gpui mark the OSC 8 paint gap and the layout_line bug
 
 ## [2026-11-19] add | tmux-style workspace keys
 input: prefix keys replace the modifier shortcuts (cmd/alt+digit superseded). daily-use: the user is a tmux user.
+
+## [2026-11-19] add | Keys from tmux
+input: prefix and bindings read from the running tmux, and why no tmux server is started for it.
