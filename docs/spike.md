@@ -36,6 +36,7 @@ Tested by hand on real hardware (2026-11-09, Norwegian layout): typing latency a
 Implemented; only the parts above were tested by hand:
 
 - Keyboard: letters, shift, ctrl (a–z and `@[\]^_`), alt (ESC prefix), arrows/home/end with modifiers (`CSI 1;m X`, SS3 in app-cursor mode), pgup/pgdn/ins/del, F1–F12, enter, tab, shift-tab, esc, backspace (ctrl → BS). Unit tests cover the encoding. AltGr is xkb's Mod5, not Alt, in GPUI, so AltGr characters on a Norwegian layout (`{[]}\|@$`) arrive as `key_char` without an ESC prefix.
+- Kitty keyboard protocol when a program asks for it (alacritty tracks the flags; the core answers `CSI ? u` and restores the flags in the paint): all five flags, so shift+enter is `CSI 13;2u`. Not reported: lone modifier keys and the base layout key (GPUI gives neither), lock modifiers. Releases go out only for keys whose press did.
 - Scrollback with the wheel, shift+pgup/pgdn. In the alternate screen the wheel sends arrow keys (alternate scroll), and with mouse reporting on, it sends wheel buttons.
 - Mouse reporting (X10 and SGR: press, release, drag, motion) when the program asks for it; shift bypasses it.
 - Selection: click-drag, double-click (word), triple-click (line). ctrl+shift+c copies to the clipboard; ctrl+shift+v pastes (bracketed when the program asked for it).
@@ -46,7 +47,6 @@ Implemented; only the parts above were tested by hand:
 - Keystroke-to-glyph latency not measured (feels fine by hand).
 - Middle-click may never reach nerdr: on Linux, GPUI did not call the middle-button handler when tested. If so, programs with mouse reporting (vim `mouse=a`, tmux) get no middle-clicks either. Not investigated.
 - No IME (GPUI's `InputHandler` isn't wired). Dead keys/compose come through GPUI's own compose handling.
-- Kitty keyboard protocol: keys are always legacy xterm encoding, even when a program pushes kitty flags (the core tracks the mode, `\e[=0;1u` in the paint). Programs fall back, but e.g. ctrl+enter and shift+enter can't be told apart.
 - No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), cursor blink, bell, URL detection.
 - `display` is sent only on attach. GPUI reports scale factor 1 before the window is on an output, so the cell size given to the core can be in logical pixels (`CSI 16t` answered 20×8 instead of 41×17 at scale 2). There's no call to update `display` later; re-attach would be the fix.
 - Resize reflows in two places, alacritty in the client and Ghostty in the core. They can disagree on soft-wrapped lines until the program redraws or we re-attach.

@@ -1,6 +1,7 @@
 //! One hc terminal in a GPUI view: alacritty_terminal keeps the grid, a canvas draws it.
 
 use std::cell::{Cell as StdCell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,13 +19,13 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle,
-    FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    FontWeight, Hsla, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString, TextRun, Window, canvas,
     div, fill, font, outline, point, prelude::*, px, size,
 };
 
 use crate::hc;
-use crate::keys;
+use crate::keys::{self, KeyAction};
 use crate::theme::{self, hsla};
 
 // Kitty's font when installed, else the bundled one.
@@ -143,6 +144,8 @@ pub struct TerminalView {
     origin: Rc<StdCell<Point<Pixels>>>,
     scroll_acc: f32,
     selecting: bool,
+    /// Keys whose press was sent, so their release can be too.
+    pressed: HashSet<String>,
     title: String,
     /// The window's title as last set, shared by all tabs.
     window_title: Rc<RefCell<String>>,
@@ -168,6 +171,7 @@ impl TerminalView {
         let title = Arc::new(Mutex::new(None));
         let config = term::Config {
             scrolling_history: 10_000,
+            kitty_keyboard: true,
             ..Default::default()
         };
         let term = Term::new(
@@ -236,6 +240,7 @@ impl TerminalView {
             origin: Rc::new(StdCell::new(point(px(PAD), px(PAD)))),
             scroll_acc: 0.,
             selecting: false,
+            pressed: HashSet::new(),
             title,
             window_title,
             _tasks: vec![wake],
@@ -278,7 +283,9 @@ impl TerminalView {
             return;
         }
         let mode = self.mode();
-        if let Some(bytes) = keys::encode(k, mode) {
+        let action = if ev.is_held { KeyAction::Repeat } else { KeyAction::Press };
+        if let Some(bytes) = keys::encode(k, mode, action) {
+            self.pressed.insert(k.key.clone());
             {
                 let mut t = self.shared.term.lock();
                 t.scroll_display(Scroll::Bottom);
@@ -286,6 +293,17 @@ impl TerminalView {
             }
             self.send(&bytes);
             cx.notify();
+        }
+    }
+
+    /// Only with the kitty protocol's event types, and only for keys whose press went out.
+    fn on_key_up(&mut self, ev: &KeyUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        if !self.pressed.remove(&k.key) {
+            return;
+        }
+        if let Some(bytes) = keys::encode(k, self.mode(), KeyAction::Release) {
+            self.send(&bytes);
         }
     }
 
@@ -500,6 +518,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_up(cx.listener(Self::on_key_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
