@@ -585,6 +585,12 @@ impl Workspace {
         let k = &ev.keystroke;
         let m = &k.modifiers;
         let key = k.key.as_str();
+        // Option+digit types characters on macOS ([]|@ on Norwegian layouts), so tabs use cmd there
+        let tab_jump = if cfg!(target_os = "macos") {
+            m.platform && !m.alt
+        } else {
+            m.alt && !m.platform
+        };
         let handled = match (m.control, m.shift, m.alt, key) {
             (true, true, false, "t") => {
                 self.new_tab(false, window, cx);
@@ -614,7 +620,7 @@ impl Workspace {
                 self.cycle_space(-1, window, cx);
                 true
             }
-            (false, false, true, d) if d.len() == 1 && ("1"..="9").contains(&d) => {
+            (false, false, _, d) if tab_jump && d.len() == 1 && ("1"..="9").contains(&d) => {
                 let t = d.parse::<usize>().unwrap() - 1;
                 self.select(self.active, Some(t), window, cx);
                 true
