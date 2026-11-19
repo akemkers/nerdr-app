@@ -30,6 +30,7 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - Rejected: starting a tmux server to read `tmux.conf` when none runs, because that runs the user's plugins too (tpm, continuum's session restore). Without a running tmux the defaults apply. Also rejected: parsing `tmux.conf` ourselves, since tmux's own parser is the only exact one.
 - `NERDR_DEBUG=1` logs the prefix, base-index and the mapped bindings at start.
 - Splits are tmux's: `split-window -h` side by side, `-v` (or no flag) one above the other, `kill-pane` closes the pane and the tab with its last pane. A new pane always starts in the active pane's directory, as with the user's `-c "#{pane_current_path}"`; tmux without `-c` would use the session's directory, which nerdr doesn't have.
+- Moving between panes is tmux's: select-pane `-t :.+` (`o`), `-L/-R/-U/-D` (arrows, wrapping to the far side at the edge as tmux does), last-pane (`;`), resize-pane -Z (`z`). Anything that changes the active pane ends a zoom.
 - Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
 
 ## Mouse and clipboard

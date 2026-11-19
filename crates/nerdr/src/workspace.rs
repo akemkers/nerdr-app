@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::hc;
-use crate::panes::{Dir, Node};
+use crate::panes::{Dir, Node, Side};
 use crate::prefix::{self, Action, Keys};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
@@ -256,6 +256,10 @@ struct Tab {
     panes: Node<Pane>,
     /// The active pane's address.
     active: String,
+    /// The pane active before it, for tmux's last-pane.
+    last: Option<String>,
+    /// tmux's zoom: only the active pane shows.
+    zoomed: bool,
 }
 
 struct Pane {
@@ -464,6 +468,8 @@ impl Workspace {
             id: tab_id(),
             panes,
             active: doc.active,
+            last: None,
+            zoomed: false,
         })
     }
 
@@ -532,8 +538,53 @@ impl Workspace {
         };
         let tab = &mut self.spaces[si].tabs[ti];
         if tab.active != address {
-            tab.active = address.to_string();
+            tab.last = Some(std::mem::replace(&mut tab.active, address.to_string()));
+            tab.zoomed = false;
             self.save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Makes a pane of the active tab the active one; focusing it does the rest.
+    fn activate_pane(&mut self, address: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = address.and_then(|a| Some(self.active_tab()?.pane(&a)?.view.clone())) else {
+            return;
+        };
+        window.focus(&p.focus_handle(cx));
+    }
+
+    /// tmux's select-pane -t :.+ and :.-, in pane order, wrapping.
+    fn cycle_pane(&mut self, d: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let next = self.active_tab().and_then(|t| {
+            let leaves = t.panes.leaves();
+            let i = leaves.iter().position(|p| p.address == t.active)? as isize;
+            let n = leaves.len() as isize;
+            Some(leaves[(i + d).rem_euclid(n) as usize].address.clone())
+        });
+        self.activate_pane(next, window, cx);
+    }
+
+    fn last_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last = self.active_tab().and_then(|t| t.last.clone());
+        self.activate_pane(last, window, cx);
+    }
+
+    fn select_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let next = self.active_tab().and_then(|t| {
+            let p = t.panes.neighbor(&|p: &Pane| p.address == t.active, side)?;
+            Some(p.address.clone())
+        });
+        self.activate_pane(next, window, cx);
+    }
+
+    fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = self.spaces.get_mut(self.active) else {
+            return;
+        };
+        if let Some(t) = s.tabs.get_mut(s.active)
+            && matches!(t.panes, Node::Split { .. })
+        {
+            t.zoomed = !t.zoomed;
             cx.notify();
         }
     }
@@ -670,7 +721,9 @@ impl Workspace {
                 this.edit_panes(si, ti, |_, panes| {
                     Some(panes.split(&|p: &Pane| p.address == at, dir, new).0)
                 });
-                this.spaces[si].tabs[ti].active = address;
+                let tab = &mut this.spaces[si].tabs[ti];
+                tab.last = Some(std::mem::replace(&mut tab.active, address));
+                tab.zoomed = false;
                 this.focus_active(window, cx);
                 this.save(cx);
                 cx.notify();
@@ -730,8 +783,15 @@ impl Workspace {
         let kept = self.edit_panes(si, ti, |_, panes| panes.remove(&|p: &Pane| p.address == address));
         if kept {
             let tab = &mut self.spaces[si].tabs[ti];
+            tab.zoomed = false;
             if tab.active == address {
-                tab.active = tab.panes.leaves()[0].address.clone();
+                // As tmux: back to the last pane when it's still there
+                tab.active = match tab.last.take() {
+                    Some(l) if tab.pane(&l).is_some() => l,
+                    _ => tab.panes.leaves()[0].address.clone(),
+                };
+            } else if tab.last.as_deref() == Some(address) {
+                tab.last = None;
             }
         } else {
             let s = &mut self.spaces[si];
@@ -849,6 +909,11 @@ impl Workspace {
             Action::PrevSpace => self.cycle_space(-1, window, cx),
             Action::Split(dir) => self.split(dir, window, cx),
             Action::ClosePane => self.close_pane(window, cx),
+            Action::NextPane => self.cycle_pane(1, window, cx),
+            Action::PrevPane => self.cycle_pane(-1, window, cx),
+            Action::LastPane => self.last_pane(window, cx),
+            Action::SelectPane(side) => self.select_pane(side, window, cx),
+            Action::Zoom => self.toggle_zoom(cx),
             Action::ScrollPageUp => {
                 if let Some(p) = self.active_pane() {
                     p.view.update(cx, |v, cx| v.scroll_pages(1, cx));
@@ -978,7 +1043,12 @@ impl Workspace {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(self.tab_label(t, cx)),
+                            // tmux's window_zoomed_flag, as in the user's status line
+                            .child(if t.zoomed {
+                                format!("{} 🔍", self.tab_label(t, cx))
+                            } else {
+                                self.tab_label(t, cx)
+                            }),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select(si, Some(ti), window, cx)
@@ -1044,7 +1114,10 @@ impl Render for Workspace {
             .flex_1()
             .h_full()
             .overflow_hidden()
-            .children(self.active_tab().map(|t| render_panes(&t.panes, &t.active)));
+            .children(self.active_tab().map(|t| match t.active_pane() {
+                Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
+                _ => render_panes(&t.panes, &t.active),
+            }));
         div()
             .size_full()
             .flex()

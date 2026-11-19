@@ -7,7 +7,7 @@ use std::process::Command;
 
 use gpui::Keystroke;
 
-use crate::panes::Dir;
+use crate::panes::{Dir, Side};
 
 /// Overrides the prefix; the same variable as the tmux-based nerdr.
 const PREFIX_VAR: &str = "NERDR_PREFIKS";
@@ -83,6 +83,12 @@ pub enum Action {
     /// tmux's split-window: `-h` side by side, else one above the other.
     Split(Dir),
     ClosePane,
+    NextPane,
+    PrevPane,
+    LastPane,
+    SelectPane(Side),
+    /// tmux's resize-pane -Z: the active pane fills the tab, and back.
+    Zoom,
     NewSpace,
     NextSpace,
     PrevSpace,
@@ -245,6 +251,14 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
         // Always in the active pane's directory, as with `-c "#{pane_current_path}"`
         "split-window" if has("-h") => Action::Split(Dir::Horizontal),
         "split-window" => Action::Split(Dir::Vertical),
+        "select-pane" if has("-L") => Action::SelectPane(Side::Left),
+        "select-pane" if has("-R") => Action::SelectPane(Side::Right),
+        "select-pane" if has("-U") => Action::SelectPane(Side::Up),
+        "select-pane" if has("-D") => Action::SelectPane(Side::Down),
+        "select-pane" if has(":.+") => Action::NextPane,
+        "select-pane" if has(":.-") => Action::PrevPane,
+        "last-pane" => Action::LastPane,
+        "resize-pane" if has("-Z") => Action::Zoom,
         "switch-client" if has("-n") => Action::NextSpace,
         "switch-client" if has("-p") => Action::PrevSpace,
         "detach-client" => Action::Quit,
@@ -270,6 +284,13 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         "x" => Action::ClosePane,
         "%" => Action::Split(Dir::Horizontal),
         "\"" => Action::Split(Dir::Vertical),
+        "o" => Action::NextPane,
+        ";" => Action::LastPane,
+        "z" => Action::Zoom,
+        "Left" => Action::SelectPane(Side::Left),
+        "Right" => Action::SelectPane(Side::Right),
+        "Up" => Action::SelectPane(Side::Up),
+        "Down" => Action::SelectPane(Side::Down),
         ")" => Action::NextSpace,
         "(" => Action::PrevSpace,
         "PPage" => Action::ScrollPageUp,
@@ -328,6 +349,9 @@ bind-key    -T prefix &       confirm-before -p "kill-window #W? (y/n)" kill-win
 bind-key -r -T prefix C-Left  resize-pane -L
 bind-key    -T prefix X       kill-window
 bind-key    -T prefix x       kill-pane
+bind-key    -T prefix o       select-pane -t :.+
+bind-key    -T prefix Up      select-pane -U
+bind-key    -T prefix z       resize-pane -Z
 bind-key    -T prefix v       split-window -h -c "#{pane_current_path}"
 bind-key    -T prefix h       split-window -v -c "#{pane_current_path}"
 bind-key    -T prefix f       command-prompt { find-window -Z "%%" }
@@ -345,7 +369,10 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
         assert_eq!(t.get("h"), Some(&Action::Split(Dir::Vertical)));
         assert_eq!(t.get("C-f"), Some(&Action::SendPrefix));
         assert_eq!(t.get("PPage"), Some(&Action::ScrollPageUp));
-        assert_eq!(t.get(";"), None);
+        assert_eq!(t.get(";"), Some(&Action::LastPane));
+        assert_eq!(t.get("o"), Some(&Action::NextPane));
+        assert_eq!(t.get("Up"), Some(&Action::SelectPane(Side::Up)));
+        assert_eq!(t.get("z"), Some(&Action::Zoom));
         assert_eq!(t.get("f"), None);
         assert_eq!(t.get("r"), None);
         let keys = Keys { prefix: Prefix::default(), base_index: 1, table: Some(t) };

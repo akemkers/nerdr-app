@@ -25,6 +25,34 @@ pub enum Node<L> {
     },
 }
 
+/// A pane's place in the tab, in fractions of the tab's area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+const FULL: Rect = Rect {
+    x: 0.,
+    y: 0.,
+    w: 1.,
+    h: 1.,
+};
+
+/// tmux's select-pane `-L` `-R` `-U` `-D`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Side {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Slack for edges that meet after float arithmetic.
+const EPS: f32 = 1e-4;
+
 impl<L> Node<L> {
     /// In tmux's pane order: left before right, top before bottom.
     pub fn leaves(&self) -> Vec<&L> {
@@ -108,6 +136,72 @@ impl<L> Node<L> {
         self.remove(&|l: &L| !keep(l))
     }
 
+    /// Every leaf with its place in the tab.
+    pub fn rects(&self) -> Vec<(&L, Rect)> {
+        let mut out = Vec::new();
+        self.rects_in(FULL, &mut out);
+        out
+    }
+
+    fn rects_in<'a>(&'a self, r: Rect, out: &mut Vec<(&'a L, Rect)>) {
+        match self {
+            Node::Leaf(l) => out.push((l, r)),
+            Node::Split { split, ratio, a, b } => {
+                let (ra, rb) = match split {
+                    Dir::Horizontal => (
+                        Rect { w: r.w * ratio, ..r },
+                        Rect { x: r.x + r.w * ratio, w: r.w * (1. - ratio), ..r },
+                    ),
+                    Dir::Vertical => (
+                        Rect { h: r.h * ratio, ..r },
+                        Rect { y: r.y + r.h * ratio, h: r.h * (1. - ratio), ..r },
+                    ),
+                };
+                a.rects_in(ra, out);
+                b.rects_in(rb, out);
+            }
+        }
+    }
+
+    /// The pane on that side of the one `is` picks, as tmux's select-pane: the touching
+    /// pane that overlaps it most, else (at the edge) the farthest one on the other side.
+    pub fn neighbor(&self, is: &impl Fn(&L) -> bool, side: Side) -> Option<&L> {
+        let rects = self.rects();
+        let (_, r) = *rects.iter().find(|(l, _)| is(l))?;
+        // Overlap across the direction of travel, and position along it
+        let overlap = |c: &Rect| match side {
+            Side::Left | Side::Right => (c.y + c.h).min(r.y + r.h) - c.y.max(r.y),
+            Side::Up | Side::Down => (c.x + c.w).min(r.x + r.w) - c.x.max(r.x),
+        };
+        let touches = |c: &Rect| match side {
+            Side::Left => (c.x + c.w - r.x).abs() < EPS,
+            Side::Right => (r.x + r.w - c.x).abs() < EPS,
+            Side::Up => (c.y + c.h - r.y).abs() < EPS,
+            Side::Down => (r.y + r.h - c.y).abs() < EPS,
+        };
+        let far = |c: &Rect| match side {
+            Side::Left => c.x,
+            Side::Right => -c.x,
+            Side::Up => c.y,
+            Side::Down => -c.y,
+        };
+        // The best touching pane by overlap, and the best one to wrap to by distance
+        let mut near: Option<(&L, f32)> = None;
+        let mut wrap: Option<(&L, f32)> = None;
+        for (l, c) in &rects {
+            if is(l) || overlap(c) <= EPS {
+                continue;
+            }
+            if touches(c) && near.is_none_or(|(_, o)| overlap(c) > o) {
+                near = Some((*l, overlap(c)));
+            }
+            if wrap.is_none_or(|(_, f)| far(c) > f) {
+                wrap = Some((*l, far(c)));
+            }
+        }
+        near.or(wrap).map(|(l, _)| l)
+    }
+
     pub fn map<M>(&self, f: &impl Fn(&L) -> M) -> Node<M> {
         match self {
             Node::Leaf(l) => Node::Leaf(f(l)),
@@ -164,6 +258,33 @@ mod tests {
         assert_eq!(n.leaves(), ["t1", "t2", "t3"]);
         let (_, rest) = n.split(&is("t9"), Dir::Vertical, "t4".into());
         assert_eq!(rest.as_deref(), Some("t4"));
+    }
+
+    #[test]
+    fn rects_follow_the_splits() {
+        let n = split(leaf("t1"), "t1", Dir::Horizontal, "t2");
+        let n = split(n, "t2", Dir::Vertical, "t3");
+        let rects = n.rects();
+        assert_eq!(rects[0].1, Rect { x: 0., y: 0., w: 0.5, h: 1. });
+        assert_eq!(rects[2].1, Rect { x: 0.5, y: 0.5, w: 0.5, h: 0.5 });
+    }
+
+    #[test]
+    fn neighbors_touch_or_wrap() {
+        // t1 | t2
+        //    | t3
+        let n = split(leaf("t1"), "t1", Dir::Horizontal, "t2");
+        let n = split(n, "t2", Dir::Vertical, "t3");
+        let at = |a: &'static str, side| n.neighbor(&is(a), side).map(String::as_str);
+        assert_eq!(at("t1", Side::Right), Some("t2"));
+        assert_eq!(at("t3", Side::Left), Some("t1"));
+        assert_eq!(at("t3", Side::Up), Some("t2"));
+        assert_eq!(at("t2", Side::Down), Some("t3"));
+        // At the edge it wraps to the far side
+        assert_eq!(at("t1", Side::Left), Some("t2"));
+        assert_eq!(at("t2", Side::Up), Some("t3"));
+        // Nothing above or below t1
+        assert_eq!(at("t1", Side::Up), None);
     }
 
     #[test]
