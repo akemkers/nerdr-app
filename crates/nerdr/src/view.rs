@@ -12,7 +12,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Flags, Hyperlink};
 use alacritty_terminal::term::{self, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, NamedColor, Rgb};
 use futures::StreamExt;
@@ -151,6 +151,8 @@ pub struct TerminalView {
     /// The window's title as last set, shared by all tabs.
     window_title: Rc<RefCell<String>>,
     focused: bool,
+    /// The OSC 8 link under the mouse: underlined, and a click opens it.
+    hover_link: Option<Hyperlink>,
     /// In the off half of a blink.
     blink_off: bool,
     /// A key was pressed: keep the cursor on through the next tick.
@@ -264,6 +266,7 @@ impl TerminalView {
             title,
             window_title,
             focused: false,
+            hover_link: None,
             blink_off: false,
             blink_hold: false,
             _tasks: vec![wake, blink],
@@ -449,10 +452,20 @@ impl TerminalView {
             }
             cx.notify();
         }
+        let link = self.link_at(p);
+        if link != self.hover_link {
+            self.hover_link = link;
+            cx.notify();
+        }
+    }
+
+    /// The OSC 8 link at a grid point.
+    fn link_at(&self, p: GridPoint) -> Option<Hyperlink> {
+        self.shared.term.lock().grid()[p].hyperlink()
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let (_, _, cell) = self.grid_point(ev.position);
+        let (p, _, cell) = self.grid_point(ev.position);
         if self.mouse_mode(&ev.modifiers) {
             let button = match ev.button {
                 MouseButton::Left => 0,
@@ -465,11 +478,17 @@ impl TerminalView {
         }
         if self.selecting {
             self.selecting = false;
-            {
+            let clicked = {
                 let mut term = self.shared.term.lock();
-                if term.selection_to_string().is_none_or(|t| t.is_empty()) {
+                let empty = term.selection_to_string().is_none_or(|t| t.is_empty());
+                if empty {
                     term.selection = None;
                 }
+                empty
+            };
+            // A click without a drag opens the link under it
+            if clicked && let Some(link) = self.link_at(p) {
+                cx.open_url(link.uri());
             }
             cx.notify();
         }
@@ -546,12 +565,14 @@ impl Render for TerminalView {
         let stream = self.stream.clone();
         let focused = self.focus.is_focused(window);
         let hide_cursor = focused && self.blink_off;
+        let hover_link = self.hover_link.clone();
 
         div()
             .id("terminal")
             .size_full()
             .p(px(PAD))
             .bg(hsla(theme::BG))
+            .when(hover_link.is_some(), |d| d.cursor_pointer())
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key_down))
@@ -580,7 +601,12 @@ impl Render for TerminalView {
                             });
                             stream.resize(cols, rows);
                         }
-                        build_frame(&shared, &metrics, bounds, focused, hide_cursor, window)
+                        let state = FrameState {
+                            focused,
+                            hide_cursor,
+                            hover_link: hover_link.as_ref(),
+                        };
+                        build_frame(&shared, &metrics, bounds, state, window)
                     },
                     move |_, frame, window, cx| frame.paint(window, cx),
                 )
@@ -745,14 +771,25 @@ struct Segment {
     wide: bool,
 }
 
+/// What the view adds to the terminal's own state when drawing.
+struct FrameState<'a> {
+    focused: bool,
+    hide_cursor: bool,
+    hover_link: Option<&'a Hyperlink>,
+}
+
 fn build_frame(
     shared: &Shared,
     m: &Metrics,
     bounds: Bounds<Pixels>,
-    focused: bool,
-    hide_cursor: bool,
+    state: FrameState,
     window: &mut Window,
 ) -> Frame {
+    let FrameState {
+        focused,
+        hide_cursor,
+        hover_link,
+    } = state;
     let (cw, ch) = (m.cell_w, m.cell_h);
     let o = bounds.origin;
     let cell_rect = |col: usize, row: usize, w: usize| {
@@ -845,7 +882,8 @@ fn build_frame(
             } else {
                 flush_bg(bg_run.take(), &mut rects);
             }
-            if flags.intersects(Flags::ALL_UNDERLINES) {
+            let hovered = hover_link.is_some() && cell.hyperlink().as_ref() == hover_link;
+            if flags.intersects(Flags::ALL_UNDERLINES) || hovered {
                 let r = cell_rect(col, row, width);
                 let y = r.origin.y + r.size.height - px(2.);
                 rects.push((
