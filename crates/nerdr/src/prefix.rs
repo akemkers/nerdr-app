@@ -232,9 +232,10 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
         "next-window" => Action::NextTab,
         "previous-window" => Action::PrevTab,
         "last-window" => Action::LastTab,
-        "kill-window" => Action::CloseTab,
-        // tmux's default `&` asks first; nerdr closes the tab right away
-        "confirm-before" if args.last() == Some(&"kill-window") => Action::CloseTab,
+        // A tab is one pane until there are splits, and killing a window's last pane closes it
+        "kill-window" | "kill-pane" => Action::CloseTab,
+        // tmux's defaults for `&` and `x` ask first; nerdr closes right away
+        "confirm-before" if matches!(args.last(), Some(&"kill-window" | &"kill-pane")) => Action::CloseTab,
         "switch-client" if has("-n") => Action::NextSpace,
         "switch-client" if has("-p") => Action::PrevSpace,
         "detach-client" => Action::Quit,
@@ -256,7 +257,7 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         "n" => Action::NextTab,
         "p" => Action::PrevTab,
         "l" => Action::LastTab,
-        "&" => Action::CloseTab,
+        "&" | "x" => Action::CloseTab,
         ")" => Action::NextSpace,
         "(" => Action::PrevSpace,
         "PPage" => Action::ScrollPageUp,
@@ -314,6 +315,7 @@ bind-key    -T prefix 1       select-window -t :=1
 bind-key    -T prefix &       confirm-before -p "kill-window #W? (y/n)" kill-window
 bind-key -r -T prefix C-Left  resize-pane -L
 bind-key    -T prefix X       kill-window
+bind-key    -T prefix x       kill-pane
 bind-key    -T prefix f       command-prompt { find-window -Z "%%" }
 bind-key    -T prefix C-f     send-prefix
 bind-key    -T prefix PPage   copy-mode -u
@@ -324,6 +326,7 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
         assert_eq!(t.get("1"), Some(&Action::SelectTab(0)));
         assert_eq!(t.get("&"), Some(&Action::CloseTab));
         assert_eq!(t.get("X"), Some(&Action::CloseTab));
+        assert_eq!(t.get("x"), Some(&Action::CloseTab));
         assert_eq!(t.get("C-f"), Some(&Action::SendPrefix));
         assert_eq!(t.get("PPage"), Some(&Action::ScrollPageUp));
         assert_eq!(t.get(";"), None);
