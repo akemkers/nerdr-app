@@ -32,3 +32,6 @@ gpui: deferred escapes clipping and paints on top. Lines no longer light up per 
 
 ## [2026-11-19] fix | select-pane picks the most recent pane
 input: tmux's rule for which touching pane select-pane goes to.
+
+## [2026-11-19] decision | no wrapping at the edges
+input: select-pane does nothing at the tab's edge, on the user's wish.

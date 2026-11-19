@@ -171,19 +171,18 @@ impl<L> Node<L> {
     }
 
     /// The pane on that side of the one `is` picks, as tmux's select-pane: of the panes
-    /// touching that edge (at the tab's edge, the opposite one), the most recent by
-    /// `recent`; then the one that overlaps it most.
+    /// touching that edge, the most recent by `recent`; then the one that overlaps it most.
+    /// None at the tab's edge: no wrapping, unlike tmux.
     pub fn neighbor(&self, is: &impl Fn(&L) -> bool, side: Side, recent: &impl Fn(&L) -> usize) -> Option<&L> {
         let rects = self.rects();
         let (_, r) = *rects.iter().find(|(l, _)| is(l))?;
         // Where the pane's edge is, and where a candidate's facing edge is
-        let (edge, wrap) = match side {
-            Side::Left => (r.x, 1.),
-            Side::Right => (r.x + r.w, 0.),
-            Side::Up => (r.y, 1.),
-            Side::Down => (r.y + r.h, 0.),
+        let edge = match side {
+            Side::Left => r.x,
+            Side::Right => r.x + r.w,
+            Side::Up => r.y,
+            Side::Down => r.y + r.h,
         };
-        let edge = if (edge - (1. - wrap)).abs() < EPS { wrap } else { edge };
         let facing = |c: &Rect| match side {
             Side::Left => c.x + c.w,
             Side::Right => c.x,
@@ -348,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn neighbors_touch_or_wrap() {
+    fn neighbors_touch() {
         // t1 | t2
         //    | t3
         let n = split(leaf("t1"), "t1", Dir::Horizontal, "t2");
@@ -358,11 +357,10 @@ mod tests {
         assert_eq!(at("t3", Side::Left), Some("t1"));
         assert_eq!(at("t3", Side::Up), Some("t2"));
         assert_eq!(at("t2", Side::Down), Some("t3"));
-        // At the edge it wraps to the far side
-        assert_eq!(at("t1", Side::Left), Some("t2"));
-        assert_eq!(at("t2", Side::Up), Some("t3"));
-        // Nothing above or below t1
-        assert_eq!(at("t1", Side::Up), None);
+        // Nothing at the tab's edges
+        assert_eq!(at("t1", Side::Left), None);
+        assert_eq!(at("t2", Side::Up), None);
+        assert_eq!(at("t3", Side::Down), None);
     }
 
     #[test]
@@ -377,9 +375,6 @@ mod tests {
         // Back up to where you came from, as tmux
         assert_eq!(up("t2"), Some("t2"));
         assert_eq!(up("t1"), Some("t1"));
-        // Down from t3 wraps to the top row
-        let down = n.neighbor(&is("t3"), Side::Down, &|l: &String| usize::from(l == "t2"));
-        assert_eq!(down.map(String::as_str), Some("t2"));
     }
 
     #[test]
