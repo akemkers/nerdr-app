@@ -35,3 +35,6 @@ input: tmux's rule for which touching pane select-pane goes to.
 
 ## [2026-11-19] decision | no wrapping at the edges
 input: select-pane does nothing at the tab's edge, on the user's wish.
+
+## [2026-11-19] fix | active pane frame was one key late
+gpui: notify inside a focus listener doesn't bring a frame; defer it.

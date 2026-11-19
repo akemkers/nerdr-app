@@ -502,8 +502,11 @@ impl Workspace {
         });
         let changed = cx.observe(&view, |_, _, cx| cx.notify());
         let a = address.clone();
-        let focused = cx.on_focus_in(&view.focus_handle(cx), window, move |this, _, cx| {
-            this.on_pane_focused(&a, cx)
+        // Focus listeners run at the end of a draw, where a notify doesn't bring a new
+        // frame, so the border would wait for the next key. Deferred, it runs after.
+        let focused = cx.on_focus_in(&view.focus_handle(cx), window, move |_, window, cx| {
+            let a = a.clone();
+            cx.defer_in(window, move |this, _, cx| this.on_pane_focused(&a, cx));
         });
         Pane {
             address,
