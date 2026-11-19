@@ -113,6 +113,17 @@ fn new_id() -> String {
     format!("s{ms:x}{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Our colors and cell size, so the core answers the program's display queries like we look.
+pub fn display(m: &Metrics, window: &gpui::Window) -> Value {
+    let s = window.scale_factor();
+    json!({
+        "fg": theme::hex_str(theme::FG),
+        "bg": theme::hex_str(theme::BG),
+        "cursor": theme::hex_str(theme::CURSOR),
+        "cell": [(m.cell_w * s).round() as u32, (m.cell_h * s).round() as u32],
+    })
+}
+
 /// `terminal.run` params for a new shell in `cwd`.
 pub fn shell_params(cwd: &str, cols: u16, rows: u16, display: &Value) -> Value {
     json!({
@@ -211,7 +222,10 @@ pub struct Workspace {
     save_again: bool,
     focus: FocusHandle,
     window_title: Rc<RefCell<String>>,
+    /// The scale `metrics` and `display` were made for.
+    scale: f32,
     _tasks: Vec<Task<()>>,
+    _subs: Vec<Subscription>,
 }
 
 impl Workspace {
@@ -246,7 +260,9 @@ impl Workspace {
             save_again: false,
             focus: cx.focus_handle(),
             window_title: Rc::default(),
+            scale: window.scale_factor(),
             _tasks: vec![feed],
+            _subs: vec![cx.observe_window_bounds(window, Self::on_bounds)],
         };
         for s in layout.spaces {
             let tabs = s
@@ -263,6 +279,26 @@ impl Workspace {
         }
         this.save(cx);
         this
+    }
+
+    /// A new scale (another display, or the first real one) changes the cell size in
+    /// pixels. The core only takes `display` on attach, so every tab attaches again.
+    fn on_bounds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let scale = window.scale_factor();
+        if scale == self.scale {
+            return;
+        }
+        self.scale = scale;
+        self.metrics = Metrics::new(f32::from(self.metrics.font_size), window);
+        self.display = display(&self.metrics, window);
+        for si in 0..self.spaces.len() {
+            for ti in 0..self.spaces[si].tabs.len() {
+                let address = self.spaces[si].tabs[ti].address.clone();
+                self.spaces[si].tabs[ti] = self.open_tab(address, window, cx);
+            }
+        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn layout(&self) -> Layout {

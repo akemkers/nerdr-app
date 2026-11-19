@@ -16,7 +16,6 @@ use gpui::{
     App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size,
 };
 use futures::StreamExt;
-use serde_json::{Value, json};
 
 use crate::view::Metrics;
 use crate::workspace::Workspace;
@@ -57,7 +56,7 @@ fn main() {
                 let metrics = Metrics::new(font_size, window);
                 let vp = window.viewport_size();
                 let (cols, rows) = metrics.grid_size(f32::from(vp.width), f32::from(vp.height));
-                let display = display(&metrics, window);
+                let display = workspace::display(&metrics, window);
                 let started = connect().and_then(|client| {
                     let (layout, version, info) =
                         workspace::load(&client, address.as_deref(), cols, rows, &display)?;
@@ -78,17 +77,6 @@ fn main() {
         cx.on_window_closed(|cx| cx.quit()).detach();
         cx.activate(true);
     });
-}
-
-/// Our colors and cell size, so the core answers the program's display queries like we look.
-fn display(m: &Metrics, window: &gpui::Window) -> Value {
-    let s = window.scale_factor();
-    json!({
-        "fg": theme::hex_str(theme::FG),
-        "bg": theme::hex_str(theme::BG),
-        "cursor": theme::hex_str(theme::CURSOR),
-        "cell": [(m.cell_w * s).round() as u32, (m.cell_h * s).round() as u32],
-    })
 }
 
 fn connect() -> Result<hc::Client> {
