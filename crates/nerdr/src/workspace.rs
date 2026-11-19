@@ -257,8 +257,9 @@ struct Tab {
     panes: Node<Pane>,
     /// The active pane's address.
     active: String,
-    /// The pane active before it: where the focus goes back to when the active pane closes.
-    last: Option<String>,
+    /// The panes active before it, the most recent last: where select-pane goes among
+    /// equals, and where the focus goes back to when the active pane closes.
+    recent: Vec<String>,
     /// tmux's zoom: only the active pane shows.
     zoomed: bool,
 }
@@ -270,6 +271,12 @@ struct Pane {
 }
 
 impl Tab {
+    fn set_active(&mut self, address: String) {
+        let old = std::mem::replace(&mut self.active, address);
+        self.recent.retain(|a| *a != old && *a != self.active);
+        self.recent.push(old);
+    }
+
     fn pane(&self, address: &str) -> Option<&Pane> {
         self.panes.find(&|p: &Pane| p.address == address)
     }
@@ -475,7 +482,7 @@ impl Workspace {
             id: tab_id(),
             panes,
             active: doc.active,
-            last: None,
+            recent: Vec::new(),
             zoomed: false,
         })
     }
@@ -545,7 +552,7 @@ impl Workspace {
         };
         let tab = &mut self.spaces[si].tabs[ti];
         if tab.active != address {
-            tab.last = Some(std::mem::replace(&mut tab.active, address.to_string()));
+            tab.set_active(address.to_string());
             tab.zoomed = false;
             self.save(cx);
             cx.notify();
@@ -562,7 +569,8 @@ impl Workspace {
 
     fn select_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.active_tab().and_then(|t| {
-            let p = t.panes.neighbor(&|p: &Pane| p.address == t.active, side)?;
+            let recent = |p: &Pane| t.recent.iter().position(|a| *a == p.address).map_or(0, |i| i + 1);
+            let p = t.panes.neighbor(&|p: &Pane| p.address == t.active, side, &recent)?;
             Some(p.address.clone())
         });
         self.activate_pane(next, window, cx);
@@ -772,7 +780,7 @@ impl Workspace {
                     Some(panes.split(&|p: &Pane| p.address == at, dir, new).0)
                 });
                 let tab = &mut this.spaces[si].tabs[ti];
-                tab.last = Some(std::mem::replace(&mut tab.active, address));
+                tab.set_active(address);
                 tab.zoomed = false;
                 this.focus_active(window, cx);
                 this.save(cx);
@@ -834,14 +842,13 @@ impl Workspace {
         if kept {
             let tab = &mut self.spaces[si].tabs[ti];
             tab.zoomed = false;
+            tab.recent.retain(|a| a != address);
             if tab.active == address {
-                // As tmux: back to the last pane when it's still there
-                tab.active = match tab.last.take() {
-                    Some(l) if tab.pane(&l).is_some() => l,
-                    _ => tab.panes.leaves()[0].address.clone(),
+                // As tmux: back to the last pane
+                tab.active = match tab.recent.pop() {
+                    Some(l) => l,
+                    None => tab.panes.leaves()[0].address.clone(),
                 };
-            } else if tab.last.as_deref() == Some(address) {
-                tab.last = None;
             }
         } else {
             let s = &mut self.spaces[si];

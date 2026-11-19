@@ -170,43 +170,42 @@ impl<L> Node<L> {
         }
     }
 
-    /// The pane on that side of the one `is` picks, as tmux's select-pane: the touching
-    /// pane that overlaps it most, else (at the edge) the farthest one on the other side.
-    pub fn neighbor(&self, is: &impl Fn(&L) -> bool, side: Side) -> Option<&L> {
+    /// The pane on that side of the one `is` picks, as tmux's select-pane: of the panes
+    /// touching that edge (at the tab's edge, the opposite one), the most recent by
+    /// `recent`; then the one that overlaps it most.
+    pub fn neighbor(&self, is: &impl Fn(&L) -> bool, side: Side, recent: &impl Fn(&L) -> usize) -> Option<&L> {
         let rects = self.rects();
         let (_, r) = *rects.iter().find(|(l, _)| is(l))?;
-        // Overlap across the direction of travel, and position along it
+        // Where the pane's edge is, and where a candidate's facing edge is
+        let (edge, wrap) = match side {
+            Side::Left => (r.x, 1.),
+            Side::Right => (r.x + r.w, 0.),
+            Side::Up => (r.y, 1.),
+            Side::Down => (r.y + r.h, 0.),
+        };
+        let edge = if (edge - (1. - wrap)).abs() < EPS { wrap } else { edge };
+        let facing = |c: &Rect| match side {
+            Side::Left => c.x + c.w,
+            Side::Right => c.x,
+            Side::Up => c.y + c.h,
+            Side::Down => c.y,
+        };
         let overlap = |c: &Rect| match side {
             Side::Left | Side::Right => (c.y + c.h).min(r.y + r.h) - c.y.max(r.y),
             Side::Up | Side::Down => (c.x + c.w).min(r.x + r.w) - c.x.max(r.x),
         };
-        let touches = |c: &Rect| match side {
-            Side::Left => (c.x + c.w - r.x).abs() < EPS,
-            Side::Right => (r.x + r.w - c.x).abs() < EPS,
-            Side::Up => (c.y + c.h - r.y).abs() < EPS,
-            Side::Down => (r.y + r.h - c.y).abs() < EPS,
-        };
-        let far = |c: &Rect| match side {
-            Side::Left => c.x,
-            Side::Right => -c.x,
-            Side::Up => c.y,
-            Side::Down => -c.y,
-        };
-        // The best touching pane by overlap, and the best one to wrap to by distance
-        let mut near: Option<(&L, f32)> = None;
-        let mut wrap: Option<(&L, f32)> = None;
+        let mut best: Option<(&L, usize, f32)> = None;
         for (l, c) in &rects {
-            if is(l) || overlap(c) <= EPS {
+            let o = overlap(c);
+            if is(l) || o <= EPS || (facing(c) - edge).abs() >= EPS {
                 continue;
             }
-            if touches(c) && near.is_none_or(|(_, o)| overlap(c) > o) {
-                near = Some((*l, overlap(c)));
-            }
-            if wrap.is_none_or(|(_, f)| far(c) > f) {
-                wrap = Some((*l, far(c)));
+            let n = recent(l);
+            if best.is_none_or(|(_, bn, bo)| (n, o) > (bn, bo)) {
+                best = Some((*l, n, o));
             }
         }
-        near.or(wrap).map(|(l, _)| l)
+        best.map(|(l, _, _)| l)
     }
 
     /// tmux's resize-pane: moves the nearest line on that axis around the pane `is`
@@ -354,7 +353,7 @@ mod tests {
         //    | t3
         let n = split(leaf("t1"), "t1", Dir::Horizontal, "t2");
         let n = split(n, "t2", Dir::Vertical, "t3");
-        let at = |a: &'static str, side| n.neighbor(&is(a), side).map(String::as_str);
+        let at = |a: &'static str, side| n.neighbor(&is(a), side, &|_: &String| 0).map(String::as_str);
         assert_eq!(at("t1", Side::Right), Some("t2"));
         assert_eq!(at("t3", Side::Left), Some("t1"));
         assert_eq!(at("t3", Side::Up), Some("t2"));
@@ -364,6 +363,23 @@ mod tests {
         assert_eq!(at("t2", Side::Up), Some("t3"));
         // Nothing above or below t1
         assert_eq!(at("t1", Side::Up), None);
+    }
+
+    #[test]
+    fn neighbor_prefers_the_most_recent_pane() {
+        // t1 | t2
+        // t3 (wide)
+        let n = split(leaf("t1"), "t1", Dir::Vertical, "t3");
+        let n = split(n, "t1", Dir::Horizontal, "t2");
+        let up = |recent: &'static str| {
+            n.neighbor(&is("t3"), Side::Up, &|l: &String| usize::from(l == recent)).map(String::as_str)
+        };
+        // Back up to where you came from, as tmux
+        assert_eq!(up("t2"), Some("t2"));
+        assert_eq!(up("t1"), Some("t1"));
+        // Down from t3 wraps to the top row
+        let down = n.neighbor(&is("t3"), Side::Down, &|l: &String| usize::from(l == "t2"));
+        assert_eq!(down.map(String::as_str), Some("t2"));
     }
 
     #[test]

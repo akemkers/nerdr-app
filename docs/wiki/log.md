@@ -29,3 +29,6 @@ input: vim-tmux-navigator read from the root table; o and ; dropped on the user'
 
 ## [2026-11-19] fix | active pane frame
 gpui: deferred escapes clipping and paints on top. Lines no longer light up per split, which lit every ancestor split.
+
+## [2026-11-19] fix | select-pane picks the most recent pane
+input: tmux's rule for which touching pane select-pane goes to.
