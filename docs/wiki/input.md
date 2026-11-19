@@ -29,6 +29,7 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - The prefix, `base-index` and the bindings come from the running tmux server (`show-options -gv prefix`, `show-options -gv base-index`, `list-keys -T prefix`), as the tmux nerdr does, so the user's own bindings work (`X` closes a tab, the unbound `&` does nothing). kill-pane (`x`) also closes the tab while a tab is one pane, as in tmux when the last pane goes. tmux commands map to actions in `prefix.rs` (`command_action`); `f` is always nerdr's new space. `NERDR_PREFIKS` overrides the prefix, the same variable as in the tmux nerdr so one setting covers both.
 - Rejected: starting a tmux server to read `tmux.conf` when none runs, because that runs the user's plugins too (tpm, continuum's session restore). Without a running tmux the defaults apply. Also rejected: parsing `tmux.conf` ourselves, since tmux's own parser is the only exact one.
 - `NERDR_DEBUG=1` logs the prefix, base-index and the mapped bindings at start.
+- Splits are tmux's: `split-window -h` side by side, `-v` (or no flag) one above the other, `kill-pane` closes the pane and the tab with its last pane. A new pane always starts in the active pane's directory, as with the user's `-c "#{pane_current_path}"`; tmux without `-c` would use the session's directory, which nerdr doesn't have.
 - Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
 
 ## Mouse and clipboard

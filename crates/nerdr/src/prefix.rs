@@ -7,6 +7,8 @@ use std::process::Command;
 
 use gpui::Keystroke;
 
+use crate::panes::Dir;
+
 /// Overrides the prefix; the same variable as the tmux-based nerdr.
 const PREFIX_VAR: &str = "NERDR_PREFIKS";
 
@@ -78,6 +80,9 @@ pub enum Action {
     SelectTab(usize),
     LastTab,
     CloseTab,
+    /// tmux's split-window: `-h` side by side, else one above the other.
+    Split(Dir),
+    ClosePane,
     NewSpace,
     NextSpace,
     PrevSpace,
@@ -232,10 +237,14 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
         "next-window" => Action::NextTab,
         "previous-window" => Action::PrevTab,
         "last-window" => Action::LastTab,
-        // A tab is one pane until there are splits, and killing a window's last pane closes it
-        "kill-window" | "kill-pane" => Action::CloseTab,
+        "kill-window" => Action::CloseTab,
+        "kill-pane" => Action::ClosePane,
         // tmux's defaults for `&` and `x` ask first; nerdr closes right away
-        "confirm-before" if matches!(args.last(), Some(&"kill-window" | &"kill-pane")) => Action::CloseTab,
+        "confirm-before" if args.last() == Some(&"kill-window") => Action::CloseTab,
+        "confirm-before" if args.last() == Some(&"kill-pane") => Action::ClosePane,
+        // Always in the active pane's directory, as with `-c "#{pane_current_path}"`
+        "split-window" if has("-h") => Action::Split(Dir::Horizontal),
+        "split-window" => Action::Split(Dir::Vertical),
         "switch-client" if has("-n") => Action::NextSpace,
         "switch-client" if has("-p") => Action::PrevSpace,
         "detach-client" => Action::Quit,
@@ -257,7 +266,10 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         "n" => Action::NextTab,
         "p" => Action::PrevTab,
         "l" => Action::LastTab,
-        "&" | "x" => Action::CloseTab,
+        "&" => Action::CloseTab,
+        "x" => Action::ClosePane,
+        "%" => Action::Split(Dir::Horizontal),
+        "\"" => Action::Split(Dir::Vertical),
         ")" => Action::NextSpace,
         "(" => Action::PrevSpace,
         "PPage" => Action::ScrollPageUp,
@@ -309,24 +321,28 @@ mod tests {
 
     #[test]
     fn table_from_list_keys() {
-        let list = r#"bind-key    -T prefix (       switch-client -p
+        let list = r##"bind-key    -T prefix (       switch-client -p
 bind-key    -T prefix \;      last-pane
 bind-key    -T prefix 1       select-window -t :=1
 bind-key    -T prefix &       confirm-before -p "kill-window #W? (y/n)" kill-window
 bind-key -r -T prefix C-Left  resize-pane -L
 bind-key    -T prefix X       kill-window
 bind-key    -T prefix x       kill-pane
+bind-key    -T prefix v       split-window -h -c "#{pane_current_path}"
+bind-key    -T prefix h       split-window -v -c "#{pane_current_path}"
 bind-key    -T prefix f       command-prompt { find-window -Z "%%" }
 bind-key    -T prefix C-f     send-prefix
 bind-key    -T prefix PPage   copy-mode -u
 bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloaded"
-"#;
+"##;
         let t = parse_table(list, 1);
         assert_eq!(t.get("("), Some(&Action::PrevSpace));
         assert_eq!(t.get("1"), Some(&Action::SelectTab(0)));
         assert_eq!(t.get("&"), Some(&Action::CloseTab));
         assert_eq!(t.get("X"), Some(&Action::CloseTab));
-        assert_eq!(t.get("x"), Some(&Action::CloseTab));
+        assert_eq!(t.get("x"), Some(&Action::ClosePane));
+        assert_eq!(t.get("v"), Some(&Action::Split(Dir::Horizontal)));
+        assert_eq!(t.get("h"), Some(&Action::Split(Dir::Vertical)));
         assert_eq!(t.get("C-f"), Some(&Action::SendPrefix));
         assert_eq!(t.get("PPage"), Some(&Action::ScrollPageUp));
         assert_eq!(t.get(";"), None);

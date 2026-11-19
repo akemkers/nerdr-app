@@ -592,6 +592,11 @@ impl TerminalView {
 
 impl TerminalView {
     /// The program's title (OSC 0/2), or `nerdr — <address>` until it sets one.
+    /// The grid in cells, as last laid out.
+    pub fn grid(&self) -> (u16, u16) {
+        self.size.get()
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }

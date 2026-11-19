@@ -17,3 +17,6 @@ input: prefix keys replace the modifier shortcuts (cmd/alt+digit superseded). da
 
 ## [2026-11-19] add | Keys from tmux
 input: prefix and bindings read from the running tmux, and why no tmux server is started for it.
+
+## [2026-11-19] add | Splits
+input: split and kill-pane as in tmux.

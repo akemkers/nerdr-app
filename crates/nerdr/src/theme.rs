@@ -13,6 +13,8 @@ pub const SELECTION_FG: Rgb = rgb(0x1e1e2e);
 pub const SIDEBAR_BG: Rgb = rgb(0x11111b);
 pub const SIDEBAR_SELECTED: Rgb = rgb(0x313244);
 pub const MUTED: Rgb = rgb(0x7f849c);
+/// Lines between panes; the ones next to the active pane are YELLOW, as in the user's tmux.
+pub const PANE_BORDER: Rgb = rgb(0x585b70);
 
 pub const YELLOW: Rgb = rgb(0xf9e2af);
 pub const RED: Rgb = rgb(0xf38ba8);
