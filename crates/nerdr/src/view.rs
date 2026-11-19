@@ -304,7 +304,8 @@ impl TerminalView {
             .as_ref()
             .is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control))
             && !m.control
-            && !m.alt
+            // Option types characters on macOS ({[]}| on Norwegian layouts), as in kitty's default
+            && (!m.alt || cfg!(target_os = "macos"))
             && !m.platform
             && !m.function;
         // Left to the input handler (ime.rs), so dead keys and IMEs can compose. Not when

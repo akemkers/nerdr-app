@@ -35,7 +35,7 @@ Tested by hand on real hardware (2026-11-09, Norwegian layout): typing latency a
 
 Implemented; only the parts above were tested by hand:
 
-- Keyboard: letters, shift, ctrl (a–z and `@[\]^_`), alt (ESC prefix), arrows/home/end with modifiers (`CSI 1;m X`, SS3 in app-cursor mode), pgup/pgdn/ins/del, F1–F12, enter, tab, shift-tab, esc, backspace (ctrl → BS). Unit tests cover the encoding. AltGr is xkb's Mod5, not Alt, in GPUI, so AltGr characters on a Norwegian layout (`{[]}\|@$`) arrive as `key_char` without an ESC prefix.
+- Keyboard: letters, shift, ctrl (a–z and `@[\]^_`), alt (ESC prefix; on macOS option types characters instead when it gives one, so `{[]}|` work on Norwegian layouts, and option is no meta key), arrows/home/end with modifiers (`CSI 1;m X`, SS3 in app-cursor mode), pgup/pgdn/ins/del, F1–F12, enter, tab, shift-tab, esc, backspace (ctrl → BS). Unit tests cover the encoding. AltGr is xkb's Mod5, not Alt, in GPUI, so AltGr characters on a Norwegian layout (`{[]}\|@$`) arrive as `key_char` without an ESC prefix.
 - Kitty keyboard protocol when a program asks for it (alacritty tracks the flags; the core answers `CSI ? u` and restores the flags in the paint): all five flags, so shift+enter is `CSI 13;2u`. Not reported: lone modifier keys and the base layout key (GPUI gives neither), lock modifiers. Releases go out only for keys whose press did.
 - Scrollback with the wheel, shift+pgup/pgdn. In the alternate screen the wheel sends arrow keys (alternate scroll), and with mouse reporting on, it sends wheel buttons.
 - Mouse reporting (X10 and SGR: press, release, drag, motion) when the program asks for it; shift bypasses it.
