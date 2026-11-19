@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -32,6 +32,7 @@ use crate::theme::{self, hsla};
 const FAMILY: &str = "Hack Nerd Font Mono";
 const BUNDLED: &str = "JetBrains Mono";
 const PAD: f32 = 6.;
+const BLINK: Duration = Duration::from_millis(530);
 
 /// Font and cell size, fixed for the window's life.
 #[derive(Clone)]
@@ -149,6 +150,11 @@ pub struct TerminalView {
     title: String,
     /// The window's title as last set, shared by all tabs.
     window_title: Rc<RefCell<String>>,
+    focused: bool,
+    /// In the off half of a blink.
+    blink_off: bool,
+    /// A key was pressed: keep the cursor on through the next tick.
+    blink_hold: bool,
     _tasks: Vec<gpui::Task<()>>,
     _subs: Vec<gpui::Subscription>,
 }
@@ -228,8 +234,22 @@ impl TerminalView {
         });
 
         let focus = cx.focus_handle();
-        let focus_in = cx.on_focus_in(&focus, window, |this, _, _| this.stream.focus(true));
-        let focus_out = cx.on_focus_out(&focus, window, |this, _, _, _| this.stream.focus(false));
+        let focus_in = cx.on_focus_in(&focus, window, |this, _, _| {
+            this.focused = true;
+            this.stream.focus(true);
+        });
+        let focus_out = cx.on_focus_out(&focus, window, |this, _, _, _| {
+            this.focused = false;
+            this.stream.focus(false);
+        });
+        let blink = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK).await;
+                if this.update(cx, |this, cx| this.blink(cx)).is_err() {
+                    break;
+                }
+            }
+        });
 
         Self {
             shared,
@@ -243,8 +263,22 @@ impl TerminalView {
             pressed: HashSet::new(),
             title,
             window_title,
-            _tasks: vec![wake],
+            focused: false,
+            blink_off: false,
+            blink_hold: false,
+            _tasks: vec![wake, blink],
             _subs: vec![focus_in, focus_out],
+        }
+    }
+
+    /// Blinks only when the program asked for it and the terminal has focus.
+    fn blink(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.focused && self.shared.term.lock().cursor_style().blinking;
+        let off = wanted && !self.blink_hold && !self.blink_off;
+        self.blink_hold = false;
+        if off != self.blink_off {
+            self.blink_off = off;
+            cx.notify();
         }
     }
 
@@ -286,6 +320,8 @@ impl TerminalView {
         let action = if ev.is_held { KeyAction::Repeat } else { KeyAction::Press };
         if let Some(bytes) = keys::encode(k, mode, action) {
             self.pressed.insert(k.key.clone());
+            self.blink_off = false;
+            self.blink_hold = true;
             {
                 let mut t = self.shared.term.lock();
                 t.scroll_display(Scroll::Bottom);
@@ -509,6 +545,7 @@ impl Render for TerminalView {
         let origin = self.origin.clone();
         let stream = self.stream.clone();
         let focused = self.focus.is_focused(window);
+        let hide_cursor = focused && self.blink_off;
 
         div()
             .id("terminal")
@@ -543,7 +580,7 @@ impl Render for TerminalView {
                             });
                             stream.resize(cols, rows);
                         }
-                        build_frame(&shared, &metrics, bounds, focused, window)
+                        build_frame(&shared, &metrics, bounds, focused, hide_cursor, window)
                     },
                     move |_, frame, window, cx| frame.paint(window, cx),
                 )
@@ -713,6 +750,7 @@ fn build_frame(
     m: &Metrics,
     bounds: Bounds<Pixels>,
     focused: bool,
+    hide_cursor: bool,
     window: &mut Window,
 ) -> Frame {
     let (cw, ch) = (m.cell_w, m.cell_h);
@@ -768,7 +806,8 @@ fn build_frame(
                 fg = theme::SELECTION_FG;
                 bg = theme::SELECTION;
             }
-            let is_cursor = cell.point == cur.point && cur.shape != CursorShape::Hidden;
+            let is_cursor =
+                cell.point == cur.point && cur.shape != CursorShape::Hidden && !hide_cursor;
             if is_cursor {
                 let w = width;
                 let r = cell_rect(col, row, w);

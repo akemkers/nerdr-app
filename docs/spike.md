@@ -41,6 +41,7 @@ Implemented; only the parts above were tested by hand:
 - Mouse reporting (X10 and SGR: press, release, drag, motion) when the program asks for it; shift bypasses it.
 - Selection: click-drag, double-click (word), triple-click (line). ctrl+shift+c copies to the clipboard; ctrl+shift+v pastes (bracketed when the program asked for it).
 - FOCUS frames on window focus in/out.
+- Cursor blink (530 ms) when the program asks for it (`CSI 1/3/5 q`, `CSI ?12h`) and the terminal has focus. A key press shows the cursor again.
 - `display` (colors and cell size in device pixels) follows the scale: the core only takes it on attach, so when the scale changes (another display, or the first real one on Linux) the cell size is recomputed and every tab attaches again.
 
 ## What doesn't work (yet)
@@ -48,7 +49,7 @@ Implemented; only the parts above were tested by hand:
 - Keystroke-to-glyph latency not measured (feels fine by hand).
 - Middle-click may never reach nerdr: on Linux, GPUI did not call the middle-button handler when tested. If so, programs with mouse reporting (vim `mouse=a`, tmux) get no middle-clicks either. Not investigated.
 - No IME (GPUI's `InputHandler` isn't wired). Dead keys/compose come through GPUI's own compose handling.
-- No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), cursor blink, bell, URL detection.
+- No hyperlinks (OSC 8), images (kitty/sixel), undercurl styles (every underline style is drawn as one line), bell, URL detection.
 - Resize reflows in two places, alacritty in the client and Ghostty in the core. They can disagree on soft-wrapped lines until the program redraws or we re-attach.
 
 ## Protocol details learned
