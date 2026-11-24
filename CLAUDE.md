@@ -15,4 +15,4 @@ A native desktop app for terminals and coding agents, written in Rust with GPUI.
 
 ## Status
 
-Spike done, plus the connection layer (`hc::Client`: many streams on one socket, events, reconnect) and spaces/tabs with a sidebar (`workspace.rs`, layout saved in the hc doc `nerdr`), a hardened terminal view (kitty keyboard, IME, OSC 8 links, cursor blink), and tmux-style keys and splits read from the user's tmux (`prefix.rs`, `panes.rs`). Runs on macOS too. See docs/spike.md.
+Spike done, plus the connection layer (`hc::Client`: many streams on one socket, events, reconnect) and tasks/tabs with a sidebar (`tasks.rs` is the model, `workspace.rs` draws it; layout saved in the hc doc `nerdr`), a hardened terminal view (kitty keyboard, IME, OSC 8 links, cursor blink), and tmux-style keys and splits read from the user's tmux (`prefix.rs`, `panes.rs`). Runs on macOS too. See docs/spike.md.

@@ -1,4 +1,4 @@
-//! nerdr: a GPUI window of hc terminals, in tabs grouped into spaces.
+//! nerdr: a GPUI window of hc terminals, in tabs grouped into tasks.
 //!
 //! `nerdr [TERMINAL]` opens the saved layout, plus that terminal (an address or a name) as
 //! a tab. With nothing saved and no terminal given, it starts a shell.
@@ -8,6 +8,7 @@ mod ime;
 mod keys;
 mod panes;
 mod prefix;
+mod tasks;
 mod theme;
 mod view;
 mod workspace;

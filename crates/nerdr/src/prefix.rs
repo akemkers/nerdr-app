@@ -78,7 +78,7 @@ pub enum Action {
     NewTab,
     NextTab,
     PrevTab,
-    /// By position in the space, from 0.
+    /// By position in the task, from 0.
     SelectTab(usize),
     LastTab,
     CloseTab,
@@ -90,9 +90,9 @@ pub enum Action {
     Zoom,
     /// tmux's resize-pane -L/-R/-U/-D: that many cells.
     Resize(Side, u16),
-    NewSpace,
-    NextSpace,
-    PrevSpace,
+    NewTask,
+    NextTask,
+    PrevTask,
     ScrollPageUp,
     SendPrefix,
     Quit,
@@ -244,7 +244,7 @@ impl Keys {
     /// What the key after the prefix does: nerdr's own keys, else the tmux table.
     pub fn action(&self, key: &str) -> Option<Binding> {
         if key == "f" {
-            return Some(Binding::new(Action::NewSpace, false));
+            return Some(Binding::new(Action::NewTask, false));
         }
         match &self.table {
             Some(table) => table.get(key).cloned(),
@@ -366,7 +366,7 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
     let has = |flag: &str| args.contains(&flag);
     Some(match *name {
         "new-window" => Action::NewTab,
-        "new-session" => Action::NewSpace,
+        "new-session" => Action::NewTask,
         "next-window" => Action::NextTab,
         "previous-window" => Action::PrevTab,
         "last-window" => Action::LastTab,
@@ -397,8 +397,8 @@ fn command_action(command: &[&str], base: usize) -> Option<Action> {
             let n = args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(1);
             Action::Resize(side, n)
         }
-        "switch-client" if has("-n") => Action::NextSpace,
-        "switch-client" if has("-p") => Action::PrevSpace,
+        "switch-client" if has("-n") => Action::NextTask,
+        "switch-client" if has("-p") => Action::PrevTask,
         "detach-client" => Action::Quit,
         "copy-mode" if has("-u") => Action::ScrollPageUp,
         "send-prefix" => Action::SendPrefix,
@@ -435,12 +435,12 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         "M-Right" => Action::Resize(Side::Right, 5),
         "M-Up" => Action::Resize(Side::Up, 5),
         "M-Down" => Action::Resize(Side::Down, 5),
-        ")" => Action::NextSpace,
-        "(" => Action::PrevSpace,
+        ")" => Action::NextTask,
+        "(" => Action::PrevTask,
         "PPage" => Action::ScrollPageUp,
         "d" => Action::Quit,
-        // nerdr's own, as in the tmux nerdr: a new space where tmux would make a session
-        "f" => Action::NewSpace,
+        // nerdr's own, as in the tmux nerdr: a new task where tmux would make a session
+        "f" => Action::NewTask,
         d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
             let n = (d.as_bytes()[0] - b'0') as usize;
             Action::SelectTab(n.checked_sub(base)?)
@@ -508,7 +508,7 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
 "##;
         let t = parse_table(list, 1);
         let act = |t: &Table, k: &str| t.get(k).map(|b| b.action);
-        assert_eq!(act(&t, "("), Some(Action::PrevSpace));
+        assert_eq!(act(&t, "("), Some(Action::PrevTask));
         assert_eq!(act(&t, "1"), Some(Action::SelectTab(0)));
         assert_eq!(act(&t, "&"), Some(Action::CloseTab));
         assert_eq!(act(&t, "X"), Some(Action::CloseTab));
@@ -528,7 +528,7 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
         assert_eq!(act(&t, "M-Down"), Some(Action::Resize(Side::Down, 5)));
         assert!(t["C-Up"].repeat && !t["X"].repeat);
         let keys = Keys { base_index: 1, table: Some(t), ..Keys::default() };
-        assert_eq!(keys.action("f").map(|b| b.action), Some(Action::NewSpace));
+        assert_eq!(keys.action("f").map(|b| b.action), Some(Action::NewTask));
         assert!(keys.action("c").is_none());
     }
 

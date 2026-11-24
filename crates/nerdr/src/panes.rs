@@ -128,30 +128,6 @@ impl<L> Node<L> {
         }
     }
 
-    /// Takes out the leaf `is` picks; its sibling takes the space. `None` when the tree
-    /// was that one leaf, else the tree without it (unchanged if no leaf matched).
-    pub fn remove(self, is: &impl Fn(&L) -> bool) -> Option<Node<L>> {
-        match self {
-            Node::Leaf(l) if is(&l) => None,
-            leaf @ Node::Leaf(_) => Some(leaf),
-            Node::Split { split, ratio, a, b } => match (a.remove(is), b.remove(is)) {
-                (Some(a), Some(b)) => Some(Node::Split {
-                    split,
-                    ratio,
-                    a: Box::new(a),
-                    b: Box::new(b),
-                }),
-                (Some(only), None) | (None, Some(only)) => Some(only),
-                (None, None) => None,
-            },
-        }
-    }
-
-    /// Keeps the leaves `keep` accepts, closing up the splits around the others.
-    pub fn retain(self, keep: &impl Fn(&L) -> bool) -> Option<Node<L>> {
-        self.remove(&|l: &L| !keep(l))
-    }
-
     /// Every leaf with its place in the tab.
     pub fn rects(&self) -> Vec<(&L, Rect)> {
         let mut out = Vec::new();
@@ -399,15 +375,16 @@ mod tests {
     }
 
     #[test]
-    fn remove_lets_the_sibling_take_the_space() {
+    fn dropped_leaves_let_the_sibling_take_the_space() {
         let n = split(leaf("t1"), "t1", Dir::Horizontal, "t2");
         let n = split(n, "t2", Dir::Vertical, "t3");
-        let n = n.remove(&is("t2")).unwrap();
+        let drop = |gone: &'static str| move |l: String| (l != gone).then_some(l);
+        let n = n.try_map(&mut drop("t2")).unwrap();
         assert_eq!(n.leaves(), ["t1", "t3"]);
         assert!(matches!(n, Node::Split { split: Dir::Horizontal, .. }));
-        let n = n.remove(&is("t1")).unwrap();
+        let n = n.try_map(&mut drop("t1")).unwrap();
         assert_eq!(n, leaf("t3"));
-        assert_eq!(n.remove(&is("t3")), None);
+        assert_eq!(n.try_map(&mut drop("t3")), None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! Spaces, tabs and panes, as tmux's sessions, windows and panes. A space is a group of
-//! tabs (one project, say), a tab is a tree of panes (`panes.rs`), and a pane is one hc
-//! terminal. The layout is saved in the hc document `nerdr`, so it survives restarts of
-//! the app; the terminals themselves live in the core. Keys: `prefix.rs`.
+//! The window's content: the tasks in a sidebar and the active tab's panes beside it.
+//! The model is `tasks.rs`; here it gets terminal views, keys and drawing. The layout is
+//! saved in the hc document `nerdr`, so it survives restarts of the app; the terminals
+//! themselves live in the core. Keys: `prefix.rs`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -12,14 +12,14 @@ use anyhow::{Context as _, Result};
 use futures::StreamExt;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, KeyDownEvent, Render, Subscription,
-    Task, Window, div, prelude::*, px, relative,
+    Window, div, prelude::*, px, relative,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::hc;
 use crate::panes::{Dir, Node, Side};
 use crate::prefix::{self, Action, Binding, Keys};
+use crate::tasks::{Addressed, Tab, Task, Tasks};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
 
@@ -29,135 +29,7 @@ pub const LABEL: &str = "nerdr";
 const SIDEBAR_W: f32 = 220.;
 
 /// The saved form of the layout: the `nerdr` document.
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
-pub struct Layout {
-    #[serde(default)]
-    pub spaces: Vec<SpaceDoc>,
-    #[serde(default)]
-    pub active: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct SpaceDoc {
-    pub id: String,
-    /// Shown instead of the active tab's directory.
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub tabs: Vec<TabDoc>,
-    #[serde(default)]
-    pub active: usize,
-}
-
-/// A tab: its pane tree of terminal addresses, and the active pane.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(from = "TabRepr")]
-pub struct TabDoc {
-    pub panes: Node<String>,
-    pub active: String,
-}
-
-/// Before splits a tab was saved as its terminal's address.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum TabRepr {
-    Address(String),
-    Tab {
-        panes: Node<String>,
-        #[serde(default)]
-        active: Option<String>,
-    },
-}
-
-impl From<TabRepr> for TabDoc {
-    fn from(r: TabRepr) -> Self {
-        match r {
-            TabRepr::Address(a) => TabDoc::new(a),
-            TabRepr::Tab { panes, active } => {
-                let active = active.unwrap_or_else(|| panes.leaves()[0].clone());
-                TabDoc { panes, active }
-            }
-        }
-    }
-}
-
-impl TabDoc {
-    pub fn new(address: String) -> Self {
-        Self {
-            active: address.clone(),
-            panes: Node::Leaf(address),
-        }
-    }
-}
-
-impl Layout {
-    /// Drops panes whose terminal isn't live any more, then empty tabs and spaces, and
-    /// keeps the active indexes in range.
-    pub fn reconcile(&mut self, live: &HashSet<String>) {
-        for s in &mut self.spaces {
-            let before = s.tabs.get(s.active).map(|t| t.active.clone());
-            s.tabs = std::mem::take(&mut s.tabs)
-                .into_iter()
-                .filter_map(|t| {
-                    let panes = t.panes.retain(&|a: &String| live.contains(a))?;
-                    let active = if panes.contains(&|a: &String| *a == t.active) {
-                        t.active
-                    } else {
-                        panes.leaves()[0].clone()
-                    };
-                    Some(TabDoc { panes, active })
-                })
-                .collect();
-            s.active = before
-                .and_then(|b| s.tabs.iter().position(|t| t.panes.contains(&|a: &String| *a == b)))
-                .unwrap_or(0);
-        }
-        let before = self.spaces.get(self.active).map(|s| s.id.clone());
-        self.spaces.retain(|s| !s.tabs.is_empty());
-        self.active = before
-            .and_then(|b| self.spaces.iter().position(|s| s.id == b))
-            .unwrap_or(0);
-    }
-
-    pub fn contains(&self, address: &str) -> bool {
-        self.spaces
-            .iter()
-            .any(|s| s.tabs.iter().any(|t| t.panes.contains(&|a: &String| a == address)))
-    }
-
-    /// Adds a terminal as the active tab of the active space (a new space if none).
-    pub fn add(&mut self, address: String) {
-        if self.spaces.is_empty() {
-            self.spaces.push(SpaceDoc::new(address));
-            self.active = 0;
-            return;
-        }
-        let s = &mut self.spaces[self.active];
-        s.tabs.push(TabDoc::new(address));
-        s.active = s.tabs.len() - 1;
-    }
-}
-
-impl SpaceDoc {
-    pub fn new(first_tab: String) -> Self {
-        Self {
-            id: new_id(),
-            name: None,
-            tabs: vec![TabDoc::new(first_tab)],
-            active: 0,
-        }
-    }
-}
-
-fn new_id() -> String {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("s{ms:x}{}", N.fetch_add(1, Ordering::Relaxed))
-}
+pub type Layout = Tasks<String>;
 
 /// Our colors and cell size, so the core answers the program's display queries like we look.
 pub fn display(m: &Metrics, window: &gpui::Window) -> Value {
@@ -188,7 +60,15 @@ pub fn home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".into())
 }
 
-/// The layout to open: the saved one with dead tabs dropped, plus `address` if given.
+/// The folder a terminal started in.
+fn start_dir(info: &HashMap<String, Value>, address: &str) -> String {
+    info.get(address)
+        .and_then(|i| i["cwd"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(home)
+}
+
+/// The layout to open: the saved one with dead panes dropped, plus `address` if given.
 /// Starts a shell when nothing is left. Blocking; runs before the window has content.
 /// Returns the layout, the document version, and what the core knows about each live
 /// terminal.
@@ -201,7 +81,7 @@ pub fn load(
 ) -> Result<(Layout, u64, HashMap<String, Value>)> {
     let doc = client.call_blocking("doc.get", json!({"name": DOC}))?;
     let version = doc["version"].as_u64().unwrap_or(0);
-    let mut layout: Layout = match &doc["value"] {
+    let layout: Layout = match &doc["value"] {
         Value::Null => Layout::default(),
         v => serde_json::from_value(v.clone()).unwrap_or_else(|e| {
             eprintln!("nerdr: ignoring unreadable layout ({e}): {v}");
@@ -209,25 +89,26 @@ pub fn load(
         }),
     };
     let list = client.call_blocking("terminal.list", json!({}))?;
-    let info: HashMap<String, Value> = list["terminals"]
+    let mut info: HashMap<String, Value> = list["terminals"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|t| Some((t["address"].as_str()?.to_string(), t.clone())))
         .collect();
     let live: HashSet<String> = info.keys().cloned().collect();
-    layout.reconcile(&live);
+    let mut layout = layout.reconcile(&live);
     if let Some(a) = address {
         let a = resolve(client, a)?;
         if !layout.contains(&a) {
-            layout.add(a);
+            layout.add(start_dir(&info, &a), a);
         }
     }
-    if layout.spaces.is_empty() {
+    if layout.is_empty() {
         let run = client.call_blocking("terminal.run", shell_params(&home(), cols, rows, display))?;
         let a = run["address"].as_str().context("terminal.run: no address")?;
         eprintln!("nerdr: started {a}");
-        layout.add(a.to_string());
+        info.insert(a.to_string(), json!({"address": a, "cwd": home()}));
+        layout.add_task(home(), a.to_string());
     }
     Ok((layout, version, info))
 }
@@ -242,62 +123,23 @@ fn resolve(client: &hc::Client, t: &str) -> Result<String> {
         .to_string())
 }
 
-struct Space {
-    id: String,
-    name: Option<String>,
-    tabs: Vec<Tab>,
-    active: usize,
-    /// The tab active before this one, for tmux's last-window.
-    last: Option<u64>,
-}
-
-struct Tab {
-    /// Stays the same while panes come and go.
-    id: u64,
-    panes: Node<Pane>,
-    /// The active pane's address.
-    active: String,
-    /// The panes active before it, the most recent last: where select-pane goes among
-    /// equals, and where the focus goes back to when the active pane closes.
-    recent: Vec<String>,
-    /// tmux's zoom: only the active pane shows.
-    zoomed: bool,
-}
-
 struct Pane {
     address: String,
     view: Entity<TerminalView>,
     _subs: Vec<Subscription>,
 }
 
-impl Tab {
-    fn set_active(&mut self, address: String) {
-        let old = std::mem::replace(&mut self.active, address);
-        self.recent.retain(|a| *a != old && *a != self.active);
-        self.recent.push(old);
+impl Addressed for Pane {
+    fn address(&self) -> &str {
+        &self.address
     }
-
-    fn pane(&self, address: &str) -> Option<&Pane> {
-        self.panes.find(&|p: &Pane| p.address == address)
-    }
-
-    fn active_pane(&self) -> Option<&Pane> {
-        self.pane(&self.active)
-    }
-}
-
-fn tab_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    N.fetch_add(1, Ordering::Relaxed)
 }
 
 pub struct Workspace {
     client: hc::Client,
     metrics: Metrics,
     display: Value,
-    spaces: Vec<Space>,
-    active: usize,
+    tasks: Tasks<Pane>,
     /// What the core says about each terminal (from the event feed): title, cwd, status.
     info: HashMap<String, Value>,
     doc_version: u64,
@@ -314,7 +156,7 @@ pub struct Workspace {
     drag: Option<(u64, Vec<bool>)>,
     /// The scale `metrics` and `display` were made for.
     scale: f32,
-    _tasks: Vec<Task<()>>,
+    _tasks: Vec<gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -342,8 +184,7 @@ impl Workspace {
             client,
             metrics,
             display,
-            spaces: Vec::new(),
-            active: layout.active,
+            tasks: Tasks::default(),
             info,
             doc_version,
             saving: false,
@@ -358,20 +199,7 @@ impl Workspace {
             _tasks: vec![feed],
             _subs: vec![cx.observe_window_bounds(window, Self::on_bounds)],
         };
-        for s in layout.spaces {
-            let tabs = s
-                .tabs
-                .into_iter()
-                .filter_map(|t| this.open_tab(t, window, cx))
-                .collect();
-            this.spaces.push(Space {
-                id: s.id,
-                name: s.name,
-                tabs,
-                active: s.active,
-                last: None,
-            });
-        }
+        this.tasks = layout.try_map(&mut |a: String| Some(this.open_pane(a, window, cx)));
         this.save(cx);
         this
     }
@@ -386,56 +214,10 @@ impl Workspace {
         self.scale = scale;
         self.metrics = Metrics::new(f32::from(self.metrics.font_size), window);
         self.display = display(&self.metrics, window);
-        for si in 0..self.spaces.len() {
-            for ti in 0..self.spaces[si].tabs.len() {
-                self.edit_panes(si, ti, |this, panes| {
-                    panes.try_map(&mut |p: Pane| Some(this.open_pane(p.address, window, cx)))
-                });
-            }
-        }
+        let tasks = std::mem::take(&mut self.tasks);
+        self.tasks = tasks.try_map(&mut |p: Pane| Some(self.open_pane(p.address, window, cx)));
         self.focus_active(window, cx);
         cx.notify();
-    }
-
-    /// Runs `f` on a tab's pane tree, which it owns meanwhile. `None` back drops the tab.
-    fn edit_panes(
-        &mut self,
-        si: usize,
-        ti: usize,
-        f: impl FnOnce(&mut Self, Node<Pane>) -> Option<Node<Pane>>,
-    ) -> bool {
-        let mut tab = self.spaces[si].tabs.remove(ti);
-        match f(self, tab.panes) {
-            Some(panes) => {
-                tab.panes = panes;
-                self.spaces[si].tabs.insert(ti, tab);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn layout(&self) -> Layout {
-        Layout {
-            spaces: self
-                .spaces
-                .iter()
-                .map(|s| SpaceDoc {
-                    id: s.id.clone(),
-                    name: s.name.clone(),
-                    tabs: s
-                        .tabs
-                        .iter()
-                        .map(|t| TabDoc {
-                            panes: t.panes.map(&|p: &Pane| p.address.clone()),
-                            active: t.active.clone(),
-                        })
-                        .collect(),
-                    active: s.active,
-                })
-                .collect(),
-            active: self.active,
-        }
     }
 
     /// Writes the layout to the `nerdr` document. One write at a time; changes made
@@ -448,7 +230,7 @@ impl Workspace {
         }
         self.saving = true;
         let client = self.client.clone();
-        let value = serde_json::to_value(self.layout()).unwrap();
+        let value = serde_json::to_value(self.tasks.map(&|p: &Pane| p.address.clone())).unwrap();
         let version = self.doc_version;
         cx.spawn(async move |this, cx| {
             let params = |v: u64| json!({"name": DOC, "value": value, "version": v});
@@ -472,19 +254,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    fn open_tab(&mut self, doc: TabDoc, window: &mut Window, cx: &mut Context<Self>) -> Option<Tab> {
-        let panes = doc
-            .panes
-            .try_map(&mut |a: String| Some(self.open_pane(a, window, cx)))?;
-        Some(Tab {
-            id: tab_id(),
-            panes,
-            active: doc.active,
-            recent: Vec::new(),
-            zoomed: false,
-        })
     }
 
     fn open_pane(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) -> Pane {
@@ -524,25 +293,8 @@ impl Workspace {
         )
     }
 
-    fn active_tab(&self) -> Option<&Tab> {
-        let s = self.spaces.get(self.active)?;
-        s.tabs.get(s.active)
-    }
-
-    fn active_pane(&self) -> Option<&Pane> {
-        self.active_tab()?.active_pane()
-    }
-
-    /// Where a pane is: space and tab index.
-    fn find_pane(&self, address: &str) -> Option<(usize, usize)> {
-        self.spaces.iter().enumerate().find_map(|(si, s)| {
-            let ti = s.tabs.iter().position(|t| t.pane(address).is_some())?;
-            Some((si, ti))
-        })
-    }
-
     pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.active_pane() {
+        match self.tasks.active_pane() {
             Some(p) => window.focus(&p.view.focus_handle(cx)),
             None => window.focus(&self.focus),
         }
@@ -550,33 +302,17 @@ impl Workspace {
 
     /// A click (or focus_active) put the focus in a pane: it is the active one.
     fn on_pane_focused(&mut self, address: &str, cx: &mut Context<Self>) {
-        let Some((si, ti)) = self.find_pane(address) else {
-            return;
-        };
-        let tab = &mut self.spaces[si].tabs[ti];
-        if tab.active != address {
-            tab.set_active(address.to_string());
-            tab.zoomed = false;
+        if self.tasks.focus(address) {
             self.save(cx);
             cx.notify();
         }
     }
 
-    /// Makes a pane of the active tab the active one; focusing it does the rest.
-    fn activate_pane(&mut self, address: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(p) = address.and_then(|a| Some(self.active_tab()?.pane(&a)?.view.clone())) else {
-            return;
-        };
-        window.focus(&p.focus_handle(cx));
-    }
-
     fn select_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
-        let next = self.active_tab().and_then(|t| {
-            let recent = |p: &Pane| t.recent.iter().position(|a| *a == p.address).map_or(0, |i| i + 1);
-            let p = t.panes.neighbor(&|p: &Pane| p.address == t.active, side, &recent)?;
-            Some(p.address.clone())
-        });
-        self.activate_pane(next, window, cx);
+        // Focusing it does the rest
+        if let Some(p) = self.tasks.neighbor(side) {
+            window.focus(&p.view.focus_handle(cx));
+        }
     }
 
     /// Where panes go: beside the sidebar, the whole height.
@@ -585,18 +321,13 @@ impl Workspace {
         (f32::from(vp.width) - SIDEBAR_W, f32::from(vp.height))
     }
 
-    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        let s = self.spaces.get_mut(self.active)?;
-        s.tabs.get_mut(s.active)
-    }
-
     fn resize_pane(&mut self, side: Side, cells: u16, window: &mut Window, cx: &mut Context<Self>) {
         let area = self.pane_area(window);
         let cell = match side {
             Side::Left | Side::Right => self.metrics.cell_w,
             Side::Up | Side::Down => self.metrics.cell_h,
         };
-        let Some(t) = self.active_tab_mut() else {
+        let Some(t) = self.tasks.active_tab_mut() else {
             return;
         };
         let active = t.active.clone();
@@ -618,7 +349,7 @@ impl Workspace {
         }
         let (w, h) = self.pane_area(window);
         let (fx, fy) = ((f32::from(ev.position.x) - SIDEBAR_W) / w, f32::from(ev.position.y) / h);
-        let Some(t) = self.active_tab_mut().filter(|t| t.id == id) else {
+        let Some(t) = self.tasks.active_tab_mut().filter(|t| t.id == id) else {
             return;
         };
         let Some((dir, r)) = t.panes.split_at(&path) else {
@@ -639,61 +370,24 @@ impl Workspace {
     }
 
     fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
-        let Some(s) = self.spaces.get_mut(self.active) else {
-            return;
-        };
-        if let Some(t) = s.tabs.get_mut(s.active)
-            && matches!(t.panes, Node::Split { .. })
-        {
-            t.zoomed = !t.zoomed;
+        if self.tasks.toggle_zoom() {
             cx.notify();
         }
     }
 
-    fn select(&mut self, space: usize, tab: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.spaces.get_mut(space) else {
-            return;
-        };
-        if let Some(t) = tab
-            && t < s.tabs.len()
-            && t != s.active
-        {
-            s.last = s.tabs.get(s.active).map(|t| t.id);
-            s.active = t;
-        }
-        self.active = space;
+    /// After a change to which task or tab shows.
+    fn shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_active(window, cx);
         self.save(cx);
         cx.notify();
     }
 
-    fn cycle_tab(&mut self, d: isize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(s) = self.spaces.get(self.active) {
-            let n = s.tabs.len() as isize;
-            let t = (s.active as isize + d).rem_euclid(n.max(1)) as usize;
-            self.select(self.active, Some(t), window, cx);
-        }
+    fn select(&mut self, task: usize, tab: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.tasks.select(task, tab);
+        self.shown(window, cx);
     }
 
-    fn last_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.spaces.get(self.active) else {
-            return;
-        };
-        let last = s.last.and_then(|id| s.tabs.iter().position(|t| t.id == id));
-        if let Some(t) = last {
-            self.select(self.active, Some(t), window, cx);
-        }
-    }
-
-    fn cycle_space(&mut self, d: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.spaces.len() as isize;
-        if n > 0 {
-            let s = (self.active as isize + d).rem_euclid(n) as usize;
-            self.select(s, None, window, cx);
-        }
-    }
-
-    /// Where a pane's program is, for new tabs and panes next to it.
+    /// Where a pane's program is, for panes split from it.
     fn cwd_of(&self, address: &str) -> String {
         self.info
             .get(address)
@@ -702,15 +396,13 @@ impl Workspace {
             .unwrap_or_else(home)
     }
 
-    fn active_cwd(&self) -> String {
-        self.active_pane()
-            .map(|p| self.cwd_of(&p.address))
-            .unwrap_or_else(home)
-    }
-
-    /// Starts a shell and opens it as a tab: in the active space, or in a new one.
-    fn new_tab(&mut self, new_space: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = if new_space { home() } else { self.active_cwd() };
+    /// Starts a shell and opens it as a tab: in the active task's origin, or as a new task
+    /// in the home folder.
+    fn new_tab(&mut self, new_task: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = match self.tasks.new_tab_dir() {
+            Some(dir) if !new_task => dir.to_string(),
+            _ => home(),
+        };
         let (cols, rows) = self.grid_size(window);
         let run = self
             .client
@@ -725,25 +417,13 @@ impl Workspace {
             };
             let Some(address) = address else { return };
             let _ = this.update_in(cx, |this, window, cx| {
-                let Some(tab) = this.open_tab(TabDoc::new(address), window, cx) else {
-                    return;
-                };
-                if new_space || this.spaces.is_empty() {
-                    this.spaces.push(Space {
-                        id: new_id(),
-                        name: None,
-                        tabs: vec![tab],
-                        active: 0,
-                        last: None,
-                    });
-                    let last = this.spaces.len() - 1;
-                    this.select(last, Some(0), window, cx);
+                let pane = this.open_pane(address, window, cx);
+                if new_task {
+                    this.tasks.add_task(cwd, pane);
                 } else {
-                    let s = &mut this.spaces[this.active];
-                    s.tabs.push(tab);
-                    let last = s.tabs.len() - 1;
-                    this.select(this.active, Some(last), window, cx);
+                    this.tasks.add(cwd, pane);
                 }
+                this.shown(window, cx);
             });
         })
         .detach();
@@ -752,7 +432,7 @@ impl Workspace {
     /// tmux's split-window: a shell in the active pane's directory takes half of it and
     /// becomes the active pane.
     fn split(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pane) = self.active_pane() else {
+        let Some(pane) = self.tasks.active_pane() else {
             return;
         };
         let at = pane.address.clone();
@@ -775,19 +455,10 @@ impl Workspace {
             };
             let Some(address) = address else { return };
             let _ = this.update_in(cx, |this, window, cx| {
-                let Some((si, ti)) = this.find_pane(&at) else {
-                    return;
-                };
-                let new = this.open_pane(address.clone(), window, cx);
-                this.edit_panes(si, ti, |_, panes| {
-                    Some(panes.split(&|p: &Pane| p.address == at, dir, new).0)
-                });
-                let tab = &mut this.spaces[si].tabs[ti];
-                tab.set_active(address);
-                tab.zoomed = false;
-                this.focus_active(window, cx);
-                this.save(cx);
-                cx.notify();
+                let new = this.open_pane(address, window, cx);
+                if this.tasks.split(&at, dir, new).is_ok() {
+                    this.shown(window, cx);
+                }
             });
         })
         .detach();
@@ -806,7 +477,7 @@ impl Workspace {
 
     /// tmux's kill-pane: the last pane takes its tab with it.
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(address) = self.active_pane().map(|p| p.address.clone()) else {
+        let Some(address) = self.tasks.active_pane().map(|p| p.address.clone()) else {
             return;
         };
         self.remove_pane(&address, window, cx);
@@ -815,7 +486,7 @@ impl Workspace {
 
     /// tmux's kill-window: the tab and every pane in it.
     fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab() else {
+        let Some(tab) = self.tasks.active_tab() else {
             return;
         };
         let addresses: Vec<String> = tab.panes.leaves().iter().map(|p| p.address.clone()).collect();
@@ -835,38 +506,14 @@ impl Workspace {
         .detach();
     }
 
-    /// Drops the pane (detaching its stream); its sibling takes the space. Then empty tabs
-    /// and spaces go. The last pane of all closes the app.
+    /// Drops the pane (detaching its stream). The last pane of all closes the app.
     fn remove_pane(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((si, ti)) = self.find_pane(address) else {
+        if !self.tasks.contains(address) {
             return;
-        };
-        let kept = self.edit_panes(si, ti, |_, panes| panes.remove(&|p: &Pane| p.address == address));
-        if kept {
-            let tab = &mut self.spaces[si].tabs[ti];
-            tab.zoomed = false;
-            tab.recent.retain(|a| a != address);
-            if tab.active == address {
-                // As tmux: back to the last pane
-                tab.active = match tab.recent.pop() {
-                    Some(l) => l,
-                    None => tab.panes.leaves()[0].address.clone(),
-                };
-            }
-        } else {
-            let s = &mut self.spaces[si];
-            if s.active > ti || s.active >= s.tabs.len() {
-                s.active = s.active.saturating_sub(1);
-            }
-            if s.tabs.is_empty() {
-                self.spaces.remove(si);
-                if self.active > si || self.active >= self.spaces.len() {
-                    self.active = self.active.saturating_sub(1);
-                }
-            }
         }
+        self.tasks.remove_pane(address);
         self.save(cx);
-        if self.spaces.is_empty() {
+        if self.tasks.is_empty() {
             // Let the save go out before quitting
             cx.spawn(async move |_, cx| {
                 cx.background_executor()
@@ -949,6 +596,7 @@ impl Workspace {
                 cx.notify();
             } else if let Some(b) = self.keys.root(&name) {
                 let program = self
+                    .tasks
                     .active_pane()
                     .and_then(|p| self.info.get(&p.address)?["foreground"]["name"].as_str());
                 if !b.passes_to(program) {
@@ -979,27 +627,42 @@ impl Workspace {
     fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             Action::NewTab => self.new_tab(false, window, cx),
-            Action::NewSpace => self.new_tab(true, window, cx),
-            Action::NextTab => self.cycle_tab(1, window, cx),
-            Action::PrevTab => self.cycle_tab(-1, window, cx),
-            Action::SelectTab(t) => self.select(self.active, Some(t), window, cx),
-            Action::LastTab => self.last_tab(window, cx),
+            Action::NewTask => self.new_tab(true, window, cx),
+            Action::NextTab => {
+                self.tasks.cycle_tab(1);
+                self.shown(window, cx)
+            }
+            Action::PrevTab => {
+                self.tasks.cycle_tab(-1);
+                self.shown(window, cx)
+            }
+            Action::SelectTab(t) => self.select(self.tasks.active, Some(t), window, cx),
+            Action::LastTab => {
+                self.tasks.last_tab();
+                self.shown(window, cx)
+            }
             Action::CloseTab => self.close_tab(window, cx),
-            Action::NextSpace => self.cycle_space(1, window, cx),
-            Action::PrevSpace => self.cycle_space(-1, window, cx),
+            Action::NextTask => {
+                self.tasks.cycle_task(1);
+                self.shown(window, cx)
+            }
+            Action::PrevTask => {
+                self.tasks.cycle_task(-1);
+                self.shown(window, cx)
+            }
             Action::Split(dir) => self.split(dir, window, cx),
             Action::ClosePane => self.close_pane(window, cx),
             Action::SelectPane(side) => self.select_pane(side, window, cx),
             Action::Zoom => self.toggle_zoom(cx),
             Action::Resize(side, cells) => self.resize_pane(side, cells, window, cx),
             Action::ScrollPageUp => {
-                if let Some(p) = self.active_pane() {
+                if let Some(p) = self.tasks.active_pane() {
                     p.view.update(cx, |v, cx| v.scroll_pages(1, cx));
                 }
             }
             Action::SendPrefix => {
                 let ks = self.keys.prefix.keystroke();
-                if let Some(p) = self.active_pane() {
+                if let Some(p) = self.tasks.active_pane() {
                     p.view.update(cx, |v, cx| v.type_keystroke(&ks, cx));
                 }
             }
@@ -1009,7 +672,7 @@ impl Workspace {
 
     /// The sidebar label for a tab, from its active pane, as tmux names a window: the
     /// title, else the program's name, else the address.
-    fn tab_label(&self, t: &Tab, cx: &gpui::App) -> String {
+    fn tab_label(&self, t: &Tab<Pane>, cx: &gpui::App) -> String {
         let Some(p) = t.active_pane() else {
             return String::new();
         };
@@ -1023,29 +686,9 @@ impl Workspace {
             .unwrap_or_else(|| p.address.clone())
     }
 
-    /// The space's name, else the last part of its active pane's directory.
-    fn space_label(&self, s: &Space) -> String {
-        if let Some(n) = &s.name {
-            return n.clone();
-        }
-        s.tabs
-            .get(s.active)
-            .and_then(|t| t.active_pane())
-            .and_then(|p| self.info.get(&p.address))
-            .and_then(|i| i["foreground"]["cwd"].as_str().or(i["cwd"].as_str()))
-            .map(|c| {
-                if c == home() {
-                    "~".to_string()
-                } else {
-                    c.rsplit('/').next().unwrap_or(c).to_string()
-                }
-            })
-            .unwrap_or_else(|| "space".into())
-    }
-
     /// Panes as tmux draws them with lines between: the lines next to the active pane are
     /// lit, and a line can be dragged. `path` leads from the tab's root to `node`.
-    fn render_panes(&self, tab: &Tab, node: &Node<Pane>, path: Vec<bool>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_panes(&self, tab: &Tab<Pane>, node: &Node<Pane>, path: Vec<bool>, cx: &mut Context<Self>) -> AnyElement {
         let (split, ratio, a, b) = match node {
             Node::Leaf(p) => {
                 let leaf = div().relative().size_full().overflow_hidden().child(p.view.clone());
@@ -1098,7 +741,7 @@ impl Workspace {
     }
 
     /// The most urgent agent status (OSC 7501) among a tab's panes, as a color.
-    fn status_color(&self, tab: &Tab) -> Option<gpui::Hsla> {
+    fn status_color(&self, tab: &Tab<Pane>) -> Option<gpui::Hsla> {
         let rank = |state: &str| match state {
             "blocked" | "error" => (3, theme::RED),
             "done" => (2, theme::GREEN),
@@ -1128,11 +771,11 @@ impl Workspace {
             .bg(hsla(theme::SIDEBAR_BG))
             .font_family(self.metrics.font.family.clone())
             .text_size(px(13.));
-        for (si, s) in self.spaces.iter().enumerate() {
-            let active_space = si == self.active;
+        for (si, s) in self.tasks.tasks.iter().enumerate() {
+            let active_space = si == self.tasks.active;
             col = col.child(
                 div()
-                    .id(("space", si))
+                    .id(("task", si))
                     .px(px(10.))
                     .pt(px(if si == 0 { 0. } else { 10. }))
                     .pb(px(2.))
@@ -1140,7 +783,7 @@ impl Workspace {
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_color(if active_space { fg } else { dim })
-                    .child(format!("{}  {}", si + 1, self.space_label(s)))
+                    .child(format!("{}  {}", si + 1, task_label(s)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select(si, None, window, cx)
                     })),
@@ -1201,9 +844,17 @@ impl Workspace {
     }
 }
 
+/// The last part of the task's origin, `~` for the home folder.
+fn task_label(t: &Task<Pane>) -> String {
+    if t.origin == home() {
+        return "~".into();
+    }
+    t.origin.rsplit('/').find(|p| !p.is_empty()).unwrap_or(&t.origin).to_string()
+}
+
 /// A yellow frame over the dividers around the active pane. Deferred so it paints on top
 /// of the dividers and outside the pane's clip; none on the tab's outer edges.
-fn active_frame(tab: &Tab) -> Option<AnyElement> {
+fn active_frame(tab: &Tab<Pane>) -> Option<AnyElement> {
     let rects = tab.panes.rects();
     if rects.len() < 2 {
         return None;
@@ -1242,7 +893,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panes = self.active_tab().map(|t| match t.active_pane() {
+        let panes = self.tasks.active_tab().map(|t| match t.active_pane() {
             Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
             _ => self.render_panes(t, &t.panes, Vec::new(), cx),
         });
@@ -1258,90 +909,5 @@ impl Render for Workspace {
             .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .child(self.render_sidebar(cx))
             .child(main)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn layout(spaces: &[(&str, &[&str], usize)], active: usize) -> Layout {
-        Layout {
-            spaces: spaces
-                .iter()
-                .map(|(id, tabs, a)| SpaceDoc {
-                    id: id.to_string(),
-                    name: None,
-                    tabs: tabs.iter().map(|t| TabDoc::new(t.to_string())).collect(),
-                    active: *a,
-                })
-                .collect(),
-            active,
-        }
-    }
-
-    fn live(ts: &[&str]) -> HashSet<String> {
-        ts.iter().map(|t| t.to_string()).collect()
-    }
-
-    #[test]
-    fn reconcile_keeps_active_tab_and_space() {
-        let mut l = layout(&[("a", &["t1", "t2", "t3"], 2), ("b", &["t4"], 0)], 0);
-        l.reconcile(&live(&["t2", "t3", "t4"]));
-        assert_eq!(l, layout(&[("a", &["t2", "t3"], 1), ("b", &["t4"], 0)], 0));
-    }
-
-    #[test]
-    fn reconcile_drops_empty_spaces() {
-        let mut l = layout(&[("a", &["t1"], 0), ("b", &["t4"], 0), ("c", &["t5"], 0)], 2);
-        l.reconcile(&live(&["t5"]));
-        assert_eq!(l, layout(&[("c", &["t5"], 0)], 0));
-    }
-
-    #[test]
-    fn reconcile_active_tab_gone_falls_back_to_first() {
-        let mut l = layout(&[("a", &["t1", "t2"], 1)], 0);
-        l.reconcile(&live(&["t1"]));
-        assert_eq!(l, layout(&[("a", &["t1"], 0)], 0));
-    }
-
-    #[test]
-    fn reconcile_closes_up_split_tabs() {
-        let panes = Node::Leaf("t1".to_string())
-            .split(&|a: &String| a == "t1", Dir::Horizontal, "t2".to_string())
-            .0;
-        let mut l = layout(&[("a", &["x"], 0)], 0);
-        l.spaces[0].tabs[0] = TabDoc { panes, active: "t2".into() };
-        l.reconcile(&live(&["t1"]));
-        assert_eq!(l, layout(&[("a", &["t1"], 0)], 0));
-    }
-
-    #[test]
-    fn add_goes_to_active_space_or_a_new_one() {
-        let mut l = Layout::default();
-        l.add("t1".into());
-        assert_eq!(l.spaces.len(), 1);
-        l.add("t2".into());
-        assert_eq!(l.spaces[0].tabs, [TabDoc::new("t1".into()), TabDoc::new("t2".into())]);
-        assert_eq!(l.spaces[0].active, 1);
-        assert!(l.contains("t2") && !l.contains("t3"));
-    }
-
-    #[test]
-    fn layout_reads_documents_from_before_splits() {
-        let l: Layout =
-            serde_json::from_value(json!({"spaces":[{"id":"x","tabs":["t1"]}]})).unwrap();
-        assert_eq!(l, layout(&[("x", &["t1"], 0)], 0));
-    }
-
-    #[test]
-    fn layout_round_trips_splits() {
-        let panes = Node::Leaf("t1".to_string())
-            .split(&|a: &String| a == "t1", Dir::Vertical, "t2".to_string())
-            .0;
-        let mut l = layout(&[("a", &["x"], 0)], 0);
-        l.spaces[0].tabs[0] = TabDoc { panes, active: "t2".into() };
-        let back: Layout = serde_json::from_value(serde_json::to_value(&l).unwrap()).unwrap();
-        assert_eq!(back, l);
     }
 }
