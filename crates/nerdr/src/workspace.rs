@@ -18,6 +18,7 @@ use jetdiff_ui::RepoView;
 use serde_json::{Value, json};
 
 use crate::seen::Seen;
+use crate::status::{self, Level, Status};
 use crate::hc;
 use crate::panes::{Dir, Node, Side};
 use crate::prefix::{self, Action, Binding, Keys};
@@ -31,6 +32,9 @@ pub const DOC: &str = "nerdr";
 /// Every terminal nerdr starts carries this label.
 pub const LABEL: &str = "nerdr";
 const SIDEBAR_W: f32 = 220.;
+const TABBAR_H: f32 = 28.;
+/// How often each origin's repo and branch are read again.
+const CHECKOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The saved form of the layout: the `nerdr` document.
 pub type Layout = Tasks<String>;
@@ -261,6 +265,8 @@ pub struct Workspace {
     seen: Seen,
     /// Each task's diff overlay by task id, made the first time it opens.
     diffs: HashMap<String, Entity<RepoView>>,
+    /// What each origin has checked out, from the last read.
+    checkouts: HashMap<String, Option<worktree::Checkout>>,
     /// A message over the panes until the next key.
     notice: Option<String>,
     _tasks: Vec<gpui::Task<()>>,
@@ -287,6 +293,32 @@ impl Workspace {
                 }
             }
         });
+        let poll = cx.spawn(async move |this, cx| loop {
+            let Ok(origins) = this.update(cx, |this, _| {
+                this.tasks.tasks.iter().map(|t| t.origin.clone()).collect::<HashSet<_>>()
+            }) else {
+                break;
+            };
+            let read = cx.background_executor().spawn(async move {
+                origins
+                    .into_iter()
+                    .map(|o| {
+                        let c = worktree::checkout(std::path::Path::new(&o));
+                        (o, c)
+                    })
+                    .collect::<HashMap<_, _>>()
+            });
+            let checkouts = read.await;
+            // Every round, so the ages move too
+            let updated = this.update(cx, |this, cx| {
+                this.checkouts = checkouts;
+                cx.notify();
+            });
+            if updated.is_err() {
+                break;
+            }
+            cx.background_executor().timer(CHECKOUT_EVERY).await;
+        });
         let mut this = Self {
             client,
             metrics,
@@ -309,8 +341,9 @@ impl Workspace {
             window_active: window.is_window_active(),
             seen: Seen::default(),
             diffs: HashMap::new(),
+            checkouts: HashMap::new(),
             notice: None,
-            _tasks: vec![feed],
+            _tasks: vec![feed, poll],
             _subs: vec![
                 cx.observe_window_bounds(window, Self::on_bounds),
                 cx.observe_window_activation(window, |this, window, cx| {
@@ -407,11 +440,8 @@ impl Workspace {
 
     /// Cells for a terminal filling the area beside the sidebar.
     fn grid_size(&self, window: &Window) -> (u16, u16) {
-        let vp = window.viewport_size();
-        self.metrics.grid_size(
-            f32::from(vp.width) - SIDEBAR_W,
-            f32::from(vp.height),
-        )
+        let (w, h) = self.pane_area(window);
+        self.metrics.grid_size(w, h)
     }
 
     pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -465,10 +495,10 @@ impl Workspace {
         }
     }
 
-    /// Where panes go: beside the sidebar, the whole height.
+    /// Where panes go: beside the sidebar, under the tab bar.
     fn pane_area(&self, window: &Window) -> (f32, f32) {
         let vp = window.viewport_size();
-        (f32::from(vp.width) - SIDEBAR_W, f32::from(vp.height))
+        (f32::from(vp.width) - SIDEBAR_W, f32::from(vp.height) - TABBAR_H)
     }
 
     fn resize_pane(&mut self, side: Side, cells: u16, window: &mut Window, cx: &mut Context<Self>) {
@@ -498,7 +528,7 @@ impl Workspace {
             return;
         }
         let (w, h) = self.pane_area(window);
-        let (fx, fy) = ((f32::from(ev.position.x) - SIDEBAR_W) / w, f32::from(ev.position.y) / h);
+        let (fx, fy) = ((f32::from(ev.position.x) - SIDEBAR_W) / w, (f32::from(ev.position.y) - TABBAR_H) / h);
         let Some(t) = self.tasks.active_tab_mut().filter(|t| t.id == id) else {
             return;
         };
@@ -1040,11 +1070,16 @@ impl Workspace {
                             "foreground" => i["foreground"] = data.clone(),
                             // The record itself, or wrapped
                             "status" => {
-                                i["status"] = if data.get("state").is_some() {
+                                let status = if data.get("state").is_some() {
                                     data.clone()
                                 } else {
                                     data["status"].clone()
+                                };
+                                // The event leaves out when the word changed
+                                if status["state"] != i["status"]["state"] {
+                                    i["status_ms"] = status::now_ms().into();
                                 }
+                                i["status"] = status;
                             }
                             "finished" => i["state"] = "finished".into(),
                             _ => return,
@@ -1177,7 +1212,7 @@ impl Workspace {
         }
     }
 
-    /// The sidebar label for a tab, from its active pane, as tmux names a window: the
+    /// The label for a tab, from its active pane, as tmux names a window: the
     /// title, else the program's name, else the address.
     fn tab_label(&self, t: &Tab<Pane>, cx: &gpui::App) -> String {
         let Some(p) = t.active_pane() else {
@@ -1247,25 +1282,82 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// The most urgent status among a tab's panes, as a color. Done is green only until seen.
-    fn status_color(&self, tab: &Tab<Pane>) -> Option<gpui::Hsla> {
-        let rank = |state: &str, unseen: bool| match state {
-            "blocked" | "error" => (3, theme::RED),
-            "done" if unseen => (2, theme::GREEN),
-            "working" => (1, theme::YELLOW),
-            _ => (0, theme::MUTED),
-        };
-        tab.panes
-            .leaves()
-            .iter()
-            .filter_map(|p| Some(rank(self.state(&p.address)?, self.seen.is_unseen(&p.address))))
-            .max_by_key(|(r, _)| *r)
-            .map(|(_, c)| hsla(c))
+    fn pane_status(&self, address: &str) -> Option<Status> {
+        let i = self.info.get(address)?;
+        let state = i["status"]["state"].as_str()?;
+        Some(Status {
+            level: Level::of(state, self.seen.is_unseen(address)),
+            since_ms: i["status_ms"].as_u64(),
+        })
+    }
+
+    fn tab_status(&self, tab: &Tab<Pane>) -> Option<Status> {
+        status::most_urgent(tab.panes.leaves().iter().filter_map(|p| self.pane_status(&p.address)))
+    }
+
+    /// A task's card: its repo, the branch, and the most urgent status with its age.
+    fn render_card(&self, ti: usize, t: &Task<Pane>, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = ti == self.tasks.active;
+        let dim = hsla(theme::MUTED);
+        let checkout = self.checkouts.get(&t.origin).and_then(Option::as_ref);
+        let repo = checkout
+            .and_then(|c| c.repo.file_name())
+            .map_or_else(|| task_label(t), |n| n.to_string_lossy().into_owned());
+        let status = status::most_urgent(t.tabs.iter().filter_map(|tab| self.tab_status(tab)));
+        let line = || div().whitespace_nowrap().overflow_hidden().text_ellipsis();
+        let top = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .child(line().flex_1().child(repo))
+            .children(status.map(|s| {
+                let age = s.since_ms.map(|ms| status::age(ms, status::now_ms()));
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_color(dim)
+                    .child(dot(Some(s)))
+                    .children(age)
+            }));
+        div()
+            .id(("task", ti))
+            .mx(px(6.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .text_color(if active { hsla(theme::FG) } else { dim })
+            .when(active, |d| d.bg(hsla(theme::SIDEBAR_SELECTED)))
+            .child(top)
+            .children(checkout.map(|c| {
+                let badge = div()
+                    .flex_none()
+                    .px(px(4.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(hsla(theme::PANE_BORDER))
+                    .text_size(px(11.))
+                    .child("wt");
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(dim)
+                    .when(c.worktree, |d| d.child(badge))
+                    .child(line().child(c.branch.clone()))
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| this.select(ti, None, window, cx)))
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let dim = hsla(theme::MUTED);
-        let fg = hsla(theme::FG);
         let mut col = div()
             .id("sidebar")
             .w(px(SIDEBAR_W))
@@ -1273,70 +1365,14 @@ impl Workspace {
             .flex_none()
             .flex()
             .flex_col()
+            .gap(px(4.))
             .overflow_y_scroll()
             .py(px(8.))
             .bg(hsla(theme::SIDEBAR_BG))
             .font_family(self.metrics.font.family.clone())
             .text_size(px(13.));
-        for (si, s) in self.tasks.tasks.iter().enumerate() {
-            let active_space = si == self.tasks.active;
-            col = col.child(
-                div()
-                    .id(("task", si))
-                    .px(px(10.))
-                    .pt(px(if si == 0 { 0. } else { 10. }))
-                    .pb(px(2.))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(if active_space { fg } else { dim })
-                    .child(format!("{}  {}", si + 1, task_label(s)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select(si, None, window, cx)
-                    })),
-            );
-            for (ti, t) in s.tabs.iter().enumerate() {
-                let selected = active_space && ti == s.active;
-                let dot = self.status_color(t);
-                let row = div()
-                    .id(("tab", si * 1000 + ti))
-                    .mx(px(4.))
-                    .pl(px(18.))
-                    .pr(px(6.))
-                    .py(px(2.))
-                    .rounded(px(4.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_color(if selected { fg } else { dim })
-                    .when(selected, |d| d.bg(hsla(theme::SIDEBAR_SELECTED)))
-                    .child(
-                        div()
-                            .size(px(7.))
-                            .flex_none()
-                            .rounded(px(4.))
-                            .when_some(dot, |d, c| d.bg(c)),
-                    )
-                    .child(div().flex_none().child((self.keys.base_index + ti).to_string()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            // tmux's window_zoomed_flag, as in the user's status line
-                            .child(if t.zoomed {
-                                format!("{} 🔍", self.tab_label(t, cx))
-                            } else {
-                                self.tab_label(t, cx)
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select(si, Some(ti), window, cx)
-                    }));
-                col = col.child(row);
-            }
+        for (ti, t) in self.tasks.tasks.iter().enumerate() {
+            col = col.child(self.render_card(ti, t, cx));
         }
         // Red while the prefix waits for its key, like tmux's status bar with client_prefix
         let armed = self.prefix_armed;
@@ -1349,6 +1385,66 @@ impl Workspace {
         col.child(div().flex_1())
             .child(div().flex_none().flex().mx(px(10.)).mt(px(10.)).child(badge))
     }
+
+    /// The active task's tabs, along the top of its area.
+    fn render_tabbar(&self, task: &Task<Pane>, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut bar = div()
+            .id("tabbar")
+            .h(px(TABBAR_H))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.))
+            .px(px(4.))
+            .overflow_hidden()
+            .bg(hsla(theme::SIDEBAR_BG))
+            .font_family(self.metrics.font.family.clone())
+            .text_size(px(13.));
+        for (i, t) in task.tabs.iter().enumerate() {
+            let selected = i == task.active;
+            let label = self.tab_label(t, cx);
+            // tmux's window_zoomed_flag, as in the user's status line
+            let label = if t.zoomed { format!("{label} 🔍") } else { label };
+            bar = bar.child(
+                div()
+                    .id(("tab", i))
+                    .flex_none()
+                    .max_w(px(240.))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(4.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(hsla(if selected { theme::FG } else { theme::MUTED }))
+                    .when(selected, |d| d.bg(hsla(theme::SIDEBAR_SELECTED)))
+                    .child(dot(self.tab_status(t)))
+                    .child(div().flex_none().child((self.keys.base_index + i).to_string()))
+                    .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(label))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select(this.tasks.active, Some(i), window, cx)
+                    })),
+            );
+        }
+        bar
+    }
+}
+
+/// The status as a colored dot; empty when the panes report none.
+fn dot(s: Option<Status>) -> gpui::Div {
+    let color = s.map(|s| match s.level {
+        Level::Blocked => theme::RED,
+        Level::Done => theme::GREEN,
+        Level::Working => theme::YELLOW,
+        Level::Quiet => theme::MUTED,
+    });
+    div()
+        .size(px(7.))
+        .flex_none()
+        .rounded(px(4.))
+        .when_some(color, |d, c| d.bg(hsla(c)))
 }
 
 /// The last part of the task's origin, `~` for the home folder.
@@ -1409,9 +1505,14 @@ impl Render for Workspace {
                     .on_action(cx.listener(|this, _: &jetdiff_ui::Quit, window, cx| this.hide_diff(window, cx)))
                     .into_any_element(),
             ),
-            None => self.tasks.active_tab().map(|t| match t.active_pane() {
-                Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
-                _ => self.render_panes(t, &t.panes, Vec::new(), cx),
+            None => self.tasks.active_task().and_then(|task| {
+                let t = task.active_tab()?;
+                let panes = match t.active_pane() {
+                    Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
+                    _ => self.render_panes(t, &t.panes, Vec::new(), cx),
+                };
+                let area = div().flex_1().min_h(px(0.)).overflow_hidden().child(panes);
+                Some(div().size_full().flex().flex_col().child(self.render_tabbar(task, cx)).child(area).into_any_element())
             }),
         };
         let main = div()

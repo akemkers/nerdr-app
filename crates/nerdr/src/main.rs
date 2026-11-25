@@ -10,6 +10,7 @@ mod panes;
 mod prefix;
 mod repos;
 mod seen;
+mod status;
 mod tasks;
 mod theme;
 mod view;

@@ -8,6 +8,7 @@ nerdr:
 - [[window]]: window size and the fixed title, and why
 - [[testing]]: how an agent tests nerdr without touching the user's terminals, and what to hand to the user
 - [[jetdiff]]: the diff overlay: jetdiff embedded, its keys, config and quit, and why the first open blocks
+- [[sidebar]]: the task cards (repo, branch, status and age) and the tab bar along the top, and why
 - [[agent]]: the agent's status from hc (OSC 7501), done until seen, and the hooks tried before
 
 Systems around nerdr:
