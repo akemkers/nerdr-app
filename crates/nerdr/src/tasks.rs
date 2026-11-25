@@ -221,14 +221,17 @@ impl<P: Addressed> Tasks<P> {
         true
     }
 
-    /// Shows a task, and one of its tabs if given. A tab given leaves the diff overlay;
-    /// otherwise the task shows as it was left.
+    /// Shows a task, and one of its tabs if given. Another task shows as it was left, with
+    /// its diff overlay; a tab picked in the task already showing leaves the overlay.
     pub fn select(&mut self, task: usize, tab: Option<usize>) {
+        let showing = task == self.active;
         let Some(t) = self.tasks.get_mut(task) else {
             return;
         };
         if let Some(i) = tab {
-            t.diff = false;
+            if showing {
+                t.diff = false;
+            }
             if i < t.tabs.len() && i != t.active {
                 t.last = t.active_tab().map(|t| t.id);
                 t.active = i;
@@ -552,7 +555,11 @@ mod tests {
         assert_eq!(t.visible_panes(), ["t3"]);
         t.select(0, None);
         assert!(t.diff_shown());
-        // A tab picked leaves it
+        // Back from another task by one of its tabs, as a sidebar click: still there
+        t.cycle_task(1);
+        t.select(0, Some(1));
+        assert!(t.diff_shown());
+        // A tab picked in the task showing leaves it
         t.cycle_tab(1);
         assert!(!t.diff_shown());
         t.toggle_diff();
