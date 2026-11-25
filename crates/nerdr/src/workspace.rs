@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use crate::hc;
 use crate::panes::{Dir, Node, Side};
 use crate::prefix::{self, Action, Binding, Keys};
+use crate::repos;
 use crate::tasks::{Addressed, Tab, Task, Tasks};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
@@ -58,6 +59,15 @@ pub fn shell_params(cwd: &str, cols: u16, rows: u16, display: &Value) -> Value {
 
 pub fn home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".into())
+}
+
+/// A path with `~` for the home folder.
+fn tilde(path: &str) -> String {
+    let home = home();
+    match path.strip_prefix(&home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
 }
 
 /// The folder a terminal started in.
@@ -135,6 +145,18 @@ impl Addressed for Pane {
     }
 }
 
+/// The new-task popup: what's typed, and the hit picked with the arrows.
+#[derive(Default)]
+struct Picker {
+    query: String,
+    selected: usize,
+    /// The repos used before, most recent first, as `~` paths.
+    used: Vec<String>,
+}
+
+/// So many hits show in the popup.
+const PICKER_ROWS: usize = 12;
+
 pub struct Workspace {
     client: hc::Client,
     metrics: Metrics,
@@ -156,6 +178,11 @@ pub struct Workspace {
     drag: Option<(u64, Vec<bool>)>,
     /// The scale `metrics` and `display` were made for.
     scale: f32,
+    /// The popup for a new task, while it's open.
+    picker: Option<Picker>,
+    /// The repos a task can start from, as `~` paths, from the last search.
+    repos: Vec<String>,
+    searching: bool,
     _tasks: Vec<gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -196,6 +223,9 @@ impl Workspace {
             repeat_until: None,
             drag: None,
             scale: window.scale_factor(),
+            picker: None,
+            repos: Vec::new(),
+            searching: false,
             _tasks: vec![feed],
             _subs: vec![cx.observe_window_bounds(window, Self::on_bounds)],
         };
@@ -396,13 +426,9 @@ impl Workspace {
             .unwrap_or_else(home)
     }
 
-    /// Starts a shell and opens it as a tab: in the active task's origin, or as a new task
-    /// in the home folder.
-    fn new_tab(&mut self, new_task: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = match self.tasks.new_tab_dir() {
-            Some(dir) if !new_task => dir.to_string(),
-            _ => home(),
-        };
+    /// Starts a shell and opens it as a tab in the active task's origin.
+    fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.tasks.new_tab_dir().map_or_else(home, str::to_string);
         let (cols, rows) = self.grid_size(window);
         let run = self
             .client
@@ -418,11 +444,7 @@ impl Workspace {
             let Some(address) = address else { return };
             let _ = this.update_in(cx, |this, window, cx| {
                 let pane = this.open_pane(address, window, cx);
-                if new_task {
-                    this.tasks.add_task(cwd, pane);
-                } else {
-                    this.tasks.add(cwd, pane);
-                }
+                this.tasks.add(cwd, pane);
                 this.shown(window, cx);
             });
         })
@@ -528,6 +550,182 @@ impl Workspace {
         cx.notify();
     }
 
+    /// prefix+f: the popup takes the keys, and the repos are searched again meanwhile.
+    fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let used = repos::used(std::path::Path::new(&home())).iter().map(|u| tilde(u)).collect();
+        self.picker = Some(Picker {
+            used,
+            ..Default::default()
+        });
+        window.focus(&self.focus);
+        cx.notify();
+        if self.searching {
+            return;
+        }
+        self.searching = true;
+        let roots = repos::roots(std::path::Path::new(&home()));
+        let find = cx.background_spawn(async move { repos::find(&roots) });
+        cx.spawn(async move |this, cx| {
+            let found = find.await;
+            let _ = this.update(cx, |this, cx| {
+                this.repos = found.iter().map(|p| tilde(&p.to_string_lossy())).collect();
+                this.searching = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// The repos matching what's typed, best first, with the matched byte ranges.
+    fn picker_hits(&self) -> Vec<(usize, Vec<std::ops::Range<usize>>)> {
+        let Some(p) = &self.picker else {
+            return Vec::new();
+        };
+        repos::rank(&p.query, &self.repos, &p.used)
+    }
+
+    fn picker_key(&mut self, k: &gpui::Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let hits = self.picker_hits();
+        let Some(p) = &mut self.picker else {
+            return;
+        };
+        let m = &k.modifiers;
+        match (k.key.as_str(), m.control) {
+            ("escape", _) => return self.close_picker(window, cx),
+            ("enter", _) => {
+                if let Some((i, _)) = hits.get(p.selected) {
+                    let repo = self.repos[*i].clone();
+                    self.start_task(repo, window, cx);
+                }
+                return;
+            }
+            ("up", _) | ("p" | "k", true) => p.selected = p.selected.saturating_sub(1),
+            ("down", _) | ("n" | "j", true) => p.selected = (p.selected + 1).min(hits.len().saturating_sub(1)),
+            ("backspace", _) => {
+                p.query.pop();
+                p.selected = 0;
+            }
+            _ => match &k.key_char {
+                Some(t) if !m.control && !m.platform && !t.chars().any(char::is_control) => {
+                    p.query.push_str(t);
+                    p.selected = 0;
+                }
+                _ => {}
+            },
+        }
+        cx.notify();
+    }
+
+    /// A new task with `repo` (a `~` path) as its origin and the agent in its first pane.
+    fn start_task(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        let origin = match repo.strip_prefix('~') {
+            Some(rest) => format!("{}{rest}", home()),
+            None => repo,
+        };
+        repos::mark_used(std::path::Path::new(&home()), &origin);
+        let (cols, rows) = self.grid_size(window);
+        let mut params = shell_params(&origin, cols, rows, &self.display);
+        params["argv"] = json!(["claude"]);
+        let run = self.client.call("terminal.run", params);
+        cx.spawn_in(window, async move |this, cx| {
+            let address = match run.await {
+                Ok(r) => r["address"].as_str().map(str::to_string),
+                Err(e) => {
+                    eprintln!("nerdr: new task: {e:#}");
+                    None
+                }
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(address) = address {
+                    let pane = this.open_pane(address, window, cx);
+                    this.tasks.add_task(origin, pane);
+                }
+                this.shown(window, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.picker.as_ref()?;
+        let dim = hsla(theme::MUTED);
+        let hits = self.picker_hits();
+        // A window of rows that keeps the selected one in view
+        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
+        let mut list = div().flex().flex_col();
+        for (row, (i, ranges)) in hits.iter().enumerate().skip(first).take(PICKER_ROWS) {
+            let text = self.repos[*i].clone();
+            let lit = gpui::HighlightStyle {
+                color: Some(hsla(theme::YELLOW)),
+                ..Default::default()
+            };
+            let label = gpui::StyledText::new(text.clone()).with_highlights(ranges.iter().map(|r| (r.clone(), lit)));
+            list = list.child(
+                div()
+                    .id(("repo", row))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .when(row == p.selected, |d| d.bg(hsla(theme::SIDEBAR_SELECTED)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| this.start_task(text.clone(), window, cx))),
+            );
+        }
+        let note = if self.searching {
+            Some("leter etter repoer …")
+        } else if hits.is_empty() {
+            Some("ingen repoer")
+        } else {
+            None
+        };
+        let input = div()
+            .flex()
+            .flex_row()
+            .gap(px(8.))
+            .px(px(8.))
+            .pb(px(6.))
+            .child(div().text_color(dim).child("ny oppgave"))
+            .child(div().child(format!("{}▏", p.query)));
+        let panel = div()
+            .occlude()
+            .w(px(640.))
+            .p(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .bg(hsla(theme::SIDEBAR_BG))
+            .border_1()
+            .border_color(hsla(theme::PANE_BORDER))
+            .rounded(px(6.))
+            .font_family(self.metrics.font.family.clone())
+            .text_size(px(14.))
+            .text_color(hsla(theme::FG))
+            .child(input)
+            .child(list)
+            .children(note.map(|n| div().px(px(8.)).text_color(dim).child(n)));
+        Some(
+            div()
+                .absolute()
+                .top(px(60.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
     fn on_notice(&mut self, n: hc::Notice, cx: &mut Context<Self>) {
         match n {
             hc::Notice::Snapshot { terminals, .. } => {
@@ -583,6 +781,11 @@ impl Workspace {
         if matches!(k.key.as_str(), "shift" | "control" | "alt" | "platform" | "function") {
             return;
         }
+        if self.picker.is_some() {
+            cx.stop_propagation();
+            self.picker_key(k, window, cx);
+            return;
+        }
         let name = prefix::key_name(k);
         if !self.prefix_armed {
             let repeating = self.repeat_until.take().is_some_and(|t| Instant::now() < t);
@@ -626,8 +829,8 @@ impl Workspace {
 
     fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            Action::NewTab => self.new_tab(false, window, cx),
-            Action::NewTask => self.new_tab(true, window, cx),
+            Action::NewTab => self.new_tab(window, cx),
+            Action::NewTask => self.open_picker(window, cx),
             Action::NextTab => {
                 self.tasks.cycle_tab(1);
                 self.shown(window, cx)
@@ -897,7 +1100,13 @@ impl Render for Workspace {
             Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
             _ => self.render_panes(t, &t.panes, Vec::new(), cx),
         });
-        let main = div().flex_1().h_full().overflow_hidden().children(panes);
+        let main = div()
+            .relative()
+            .flex_1()
+            .h_full()
+            .overflow_hidden()
+            .children(panes)
+            .children(self.render_picker(cx));
         div()
             .size_full()
             .flex()

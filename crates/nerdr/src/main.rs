@@ -8,6 +8,7 @@ mod ime;
 mod keys;
 mod panes;
 mod prefix;
+mod repos;
 mod tasks;
 mod theme;
 mod view;

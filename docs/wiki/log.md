@@ -41,3 +41,6 @@ gpui: notify inside a focus listener doesn't bring a frame; defer it.
 
 ## [2026-11-24] change | spaces became tasks with an origin (#19)
 tasks.rs holds the model without GPUI; the old layout shape is ignored, not converted, on the user's wish.
+
+## [2026-11-25] add | new task from a repo (#22)
+prefix+f: repo popup over NERDR_MAPPER, used repos in ~/.local/state/nerdr/repos, claude as the first pane.
