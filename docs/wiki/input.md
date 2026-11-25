@@ -38,10 +38,11 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - tmux's root table (`bind -n`) works too: the user's `M-arrows` resize without the prefix. Root bindings nerdr can't run (other `if-shell`s, mouse bindings) are left out, so those keys reach the program.
 - tmux 3.8 writes its defaults for `C-`/`M-Up` and `Left` as `if-shell -F "#{?floating_pane_flag}" { floating } { tiled }`. nerdr has no floating panes, so it reads the second block. Without this only Down and Right resized.
 - In the diff overlay only the prefix is nerdr's: no root bindings and no repeat, so `C-h/j/k/l` move between jetdiff's panels and its keys work. After the prefix, `d` leaves; the actions on terminals (new tab, tabs, splits, select-pane, zoom, resize, scroll, send-prefix) leave it first and then act; new task and next/previous task don't. Escape stays jetdiff's (it hides its help). `Action::on_terminals`. See [[jetdiff]].
-- Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
+- Copy and paste are ctrl+shift+c/v (and cmd+c/v on macOS), see below; tmux's copy mode (`[`) isn't built.
 
 ## Mouse and clipboard
 
-- No primary selection: selecting doesn't copy and middle-click doesn't paste. Copy and paste are ctrl+shift+c/v, the same on every platform. The user's choice; also, GPUI only has the primary selection on Linux. Commit ad6910a.
+- No primary selection: selecting doesn't copy and middle-click doesn't paste. Copy and paste are ctrl+shift+c/v on every platform. The user's choice; also, GPUI only has the primary selection on Linux. Commit ad6910a.
+- On macOS cmd+c/v copy and paste too, as in kitty and every other Mac app. The user expected them there (2026-11-25). cmd+c without a selection does nothing.
 - Middle-clicks may never reach nerdr on Linux (GPUI didn't call the handler when tested), so mouse-reporting programs may get none. Not investigated. `docs/spike.md`.
 - OSC 8 links: hovering underlines the link and shows a hand cursor; a click without a drag opens it, like kitty. A drag still selects. Commit c0bb232. Links in the attach paint are lost: [[hc]].

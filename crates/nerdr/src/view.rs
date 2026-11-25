@@ -314,7 +314,9 @@ impl TerminalView {
             return;
         }
         cx.stop_propagation();
-        if m.control && m.shift {
+        let clipboard_key = (m.control && m.shift)
+            || (cfg!(target_os = "macos") && m.platform && !m.control && !m.alt && !m.shift);
+        if clipboard_key {
             match k.key.as_str() {
                 "c" => {
                     if let Some(text) = self.shared.term.lock().selection_to_string() {
