@@ -50,3 +50,6 @@ Backgrounds are painted before other rects; the Claude Code mascot body was a bl
 
 ## [2026-11-25] add | new task in its own worktree (#23)
 Name step in the prefix+f popup; worktree.rs wraps git (fetch, worktree add from origin/main or an existing branch) under NERDR_WORKTREES.
+
+## [2026-11-25] add | agent status from hc, done until seen (#24)
+agent: the status is hc's OSC 7501, done stays green until seen. Hooks via `--settings`, "Agent mangler" and restart were built, then dropped on the user's wish; what they taught is kept. hc: labels events and the terminal's environment. testing: a real Claude in a test session.

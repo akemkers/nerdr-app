@@ -28,6 +28,13 @@ hc server stop; rm -rf ~/.local/state/herdr-core/nerdrtest
 - `hc run --bg --json "<cmd>"` prints `{"address":"t2",...}`; without `--bg` it waits like a shell.
 - `hc send <t> <text>` pastes and presses enter. Into a terminal the user is typing in, the texts merge (`clear` + `ls -la` ran as `clearls -la`), so send only to test sessions.
 
+## A real Claude in a test session
+
+- Start the test core without the agent's own Claude session variables, or the Claude in it won't save its transcript ([[hc]]): `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_PID -u CLAUDE_CODE_CHILD_NOTES_DIR -u CLAUDE_CODE_EXECPATH HC_SESSION=nerdrtest hc server start`. Observed 2026-11-25.
+- The user's `claude` wrapper asks for an AWS team: `hc send <t> aksjehandel`. A new folder asks for trust: `hc keys <t> down enter`. `hc keys <t> shift+tab` cycles the permission mode, to get a permission prompt out of auto mode.
+- `hc events --json` in the background shows status and labels events as they come.
+- The saved layout without the app: `echo '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"nerdr"}}' | nc -U -w 2 ~/.local/state/herdr-core/nerdrtest/nerdrtest.sock`.
+
 ## Seeing what happens
 
 - `NERDR_DEBUG=1` logs hc events, stream closes and display queries nerdr leaves unanswered.
