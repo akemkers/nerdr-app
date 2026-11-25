@@ -16,6 +16,7 @@ use gpui::{
 };
 use serde_json::{Value, json};
 
+use crate::seen::Seen;
 use crate::hc;
 use crate::panes::{Dir, Node, Side};
 use crate::prefix::{self, Action, Binding, Keys};
@@ -254,6 +255,9 @@ pub struct Workspace {
     /// The repos a task can start from, as `~` paths, from the last search.
     repos: Vec<String>,
     searching: bool,
+    /// The window has the system's focus: what shows in it is seen.
+    window_active: bool,
+    seen: Seen,
     _tasks: Vec<gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -297,8 +301,17 @@ impl Workspace {
             picker: None,
             repos: Vec::new(),
             searching: false,
+            window_active: window.is_window_active(),
+            seen: Seen::default(),
             _tasks: vec![feed],
-            _subs: vec![cx.observe_window_bounds(window, Self::on_bounds)],
+            _subs: vec![
+                cx.observe_window_bounds(window, Self::on_bounds),
+                cx.observe_window_activation(window, |this, window, cx| {
+                    this.window_active = window.is_window_active();
+                    this.track_seen();
+                    cx.notify();
+                }),
+            ],
         };
         this.tasks = layout.try_map(&mut |a: String| Some(this.open_pane(a, window, cx)));
         this.save(cx);
@@ -405,8 +418,34 @@ impl Workspace {
     fn on_pane_focused(&mut self, address: &str, cx: &mut Context<Self>) {
         if self.tasks.focus(address) {
             self.save(cx);
+            self.track_seen();
             cx.notify();
         }
+    }
+
+    /// What's on screen now has been seen, so a done pane there isn't news.
+    fn track_seen(&mut self) {
+        let visible: HashSet<String> = if self.window_active {
+            self.tasks.visible_panes().into_iter().map(|p| p.address.clone()).collect()
+        } else {
+            HashSet::new()
+        };
+        let done = self
+            .tasks
+            .tasks
+            .iter()
+            .flat_map(|t| &t.tabs)
+            .flat_map(|tab| tab.panes.leaves())
+            .filter(|p| self.state(&p.address) == Some("done"))
+            .map(|p| p.address.clone())
+            .collect();
+        self.seen.update(done, &visible);
+    }
+
+    /// What a pane's program reports with OSC 7501, as hc has it: idle, working, done,
+    /// blocked or error.
+    fn state(&self, address: &str) -> Option<&str> {
+        self.info.get(address)?["status"]["state"].as_str()
     }
 
     fn select_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
@@ -480,6 +519,7 @@ impl Workspace {
     fn shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_active(window, cx);
         self.save(cx);
+        self.track_seen();
         cx.notify();
     }
 
@@ -948,6 +988,7 @@ impl Workspace {
             }
             hc::Notice::Connected { .. } | hc::Notice::Disconnected(_) => {}
         }
+        self.track_seen();
         cx.notify();
     }
 
@@ -1122,18 +1163,18 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// The most urgent agent status (OSC 7501) among a tab's panes, as a color.
+    /// The most urgent status among a tab's panes, as a color. Done is green only until seen.
     fn status_color(&self, tab: &Tab<Pane>) -> Option<gpui::Hsla> {
-        let rank = |state: &str| match state {
+        let rank = |state: &str, unseen: bool| match state {
             "blocked" | "error" => (3, theme::RED),
-            "done" => (2, theme::GREEN),
+            "done" if unseen => (2, theme::GREEN),
             "working" => (1, theme::YELLOW),
             _ => (0, theme::MUTED),
         };
         tab.panes
             .leaves()
             .iter()
-            .filter_map(|p| self.info.get(&p.address)?["status"]["state"].as_str().map(rank))
+            .filter_map(|p| Some(rank(self.state(&p.address)?, self.seen.is_unseen(&p.address))))
             .max_by_key(|(r, _)| *r)
             .map(|(_, c)| hsla(c))
     }

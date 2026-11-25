@@ -9,6 +9,7 @@ mod keys;
 mod panes;
 mod prefix;
 mod repos;
+mod seen;
 mod tasks;
 mod theme;
 mod view;

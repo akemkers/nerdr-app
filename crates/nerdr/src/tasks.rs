@@ -173,6 +173,15 @@ impl<P: Addressed> Tasks<P> {
         self.active_tab()?.active_pane()
     }
 
+    /// The panes on screen: the active tab's, or only its active pane when zoomed.
+    pub fn visible_panes(&self) -> Vec<&P> {
+        match self.active_tab() {
+            Some(t) if t.zoomed => t.active_pane().into_iter().collect(),
+            Some(t) => t.panes.leaves(),
+            None => Vec::new(),
+        }
+    }
+
     pub fn contains(&self, address: &str) -> bool {
         self.find_pane(address).is_some()
     }
@@ -523,6 +532,17 @@ mod tests {
         let back: Tasks<String> = serde_json::from_value(v).unwrap();
         assert_eq!(shape(&back), shape(&t));
         assert_eq!(back.tasks[1].base.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn visible_panes_are_the_active_tabs() {
+        let mut t = tasks(&[("/a", &["t1", "t2"], 0)], 0);
+        t.split("t1", Dir::Horizontal, "t3".into()).unwrap();
+        assert_eq!(t.visible_panes(), ["t1", "t3"]);
+        t.toggle_zoom();
+        assert_eq!(t.visible_panes(), ["t3"]);
+        t.cycle_tab(1);
+        assert_eq!(t.visible_panes(), ["t2"]);
     }
 
     #[test]

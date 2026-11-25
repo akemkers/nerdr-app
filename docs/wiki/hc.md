@@ -1,6 +1,6 @@
 ---
 sources: [https://github.com/herdrdev/herdr-core, commit 6929829, commit 28b5f4a, commit c0bb232, hc schema]
-updated: 2026-11-19
+updated: 2026-11-25
 ---
 # hc (herdr-core)
 
@@ -17,6 +17,13 @@ updated: 2026-11-19
 ## Testing
 
 - Isolated test sessions (`HC_SESSION`), `hc run --bg --json`, and the risks of `hc send`: [[testing]].
+
+## Labels and a terminal's environment
+
+- A terminal's program gets `HC_TERMINAL_ID` (its address), `HC_SESSION` and `HC_TERMINAL_SOCKET`, so `hc label "$HC_TERMINAL_ID" k=v` inside it reaches its own core, also in a test session. `hc` is on its PATH (`~/.local/bin`). Observed with hc 0.1.21.
+- `hc label t k=v` / `terminal.label` sends an event `{"type": "labels", "data": {"labels": {...}}}` with all the labels as they are now; `k=` removes one. The `Terminal` record has them under `labels`. Observed with hc 0.1.21, `hc schema`.
+- `terminal.run` takes `labels`; `hc run --label k=v` (repeatable) too.
+- The core's environment goes to every terminal. A core started from inside a Claude session passes `CLAUDE_CODE_CHILD_SESSION` and the like on, and a Claude in it says "Transcript saving is off", so `--continue` finds nothing later. Observed 2026-11-25; see [[testing]].
 
 ## Attach, paint, display
 
