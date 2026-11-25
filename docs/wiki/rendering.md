@@ -1,5 +1,5 @@
 ---
-sources: [commits 2ce9a62 d8dca33 c0bb232 2712d18, crates/nerdr/src/view.rs, crates/nerdr/src/theme.rs]
+sources: [commits 2ce9a62 d8dca33 c0bb232 2712d18 f9bd56a, crates/nerdr/src/view.rs, crates/nerdr/src/theme.rs]
 updated: 2026-11-25
 ---
 # Rendering in nerdr
@@ -21,7 +21,7 @@ How the terminal is drawn and why it looks the way it does. The reference look i
 - Light and heavy lines, corners, tees and crosses (U+2500–257F) are drawn as rectangles; `╭╮╯╰` as curves with `PathBuilder`. Why: with 130% line height the font's glyphs stop short of the cell, and vertical lines got gaps. Kitty draws them itself for the same reason. Commit 2ce9a62.
 - Double lines (`═║╔`), dashed lines and diagonals still come from the font, so double lines can still have gaps.
 - Block elements (U+2580–259F) were already rectangles, for the same reason.
-- Cell backgrounds are painted before every other rect. A background run is flushed when the run ends, so after the block elements, underlines and box lines of its own cells; painted in that order it covered them. Seen as the Claude Code mascot: its body is `█` in fg 174 on bg 16 (black), and it showed as a black square with only the default-bg edges visible.
+- Cell backgrounds are painted before every other rect. A background run is flushed when the run ends, so after the block elements, underlines and box lines of its own cells; painted in that order it covered them. Seen as the Claude Code mascot: its body is `█` in fg 174 on bg 16 (black), and it showed as a black square with only the default-bg edges visible. Commit f9bd56a.
 
 ## Cursor and overlays
 

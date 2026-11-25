@@ -1,5 +1,5 @@
 ---
-sources: [observed 2026-11-18/19 while testing commits 2ce9a62..2712d18, crates/nerdr/src/view.rs (NERDR_DEBUG)]
+sources: [observed 2026-11-18/19 while testing commits 2ce9a62..2712d18, crates/nerdr/src/view.rs (NERDR_DEBUG), observed 2026-11-25 dumping Claude Code 2.1.331 in a pty]
 updated: 2026-11-25
 ---
 # Testing nerdr as an agent
@@ -33,7 +33,7 @@ hc server stop; rm -rf ~/.local/state/herdr-core/nerdrtest
 - `NERDR_DEBUG=1` logs hc events, stream closes and display queries nerdr leaves unanswered.
 - For anything else, a temporary `eprintln!` at the spot, run, read the log, then restore the file from a copy made before (`cp view.rs /tmp/view.rs.keep`). Found this way: the title flashing was two titles 30 ms apart ([[window]]); the attach paint carries no OSC 8 ([[hc]]).
 - What a shell sends (titles, modes): spawn `zsh -i` in a pty with python `pty.fork`, send a command, print the escape sequences. See [[shell-titles]].
-- What Claude Code draws: the same pty trick with `/opt/homebrew/bin/claude` (the `claude` on PATH is an alias plus a wrapper that first asks for an AWS team), started in a folder it already trusts, else it stops at the trust dialog. Read for 8 s, then kill it.
+- What Claude Code draws: the same pty trick with `/opt/homebrew/bin/claude` (the `claude` on PATH is an alias plus a wrapper that first asks for an AWS team), started in a folder it already trusts, else it stops at the trust dialog. Read for 8 s, then kill it. Observed 2026-11-25 with Claude Code 2.1.331.
 
 ## What only the user can check
 

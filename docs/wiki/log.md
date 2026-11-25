@@ -44,3 +44,6 @@ tasks.rs holds the model without GPUI; the old layout shape is ignored, not conv
 
 ## [2026-11-25] add | new task from a repo (#22)
 prefix+f: repo popup over NERDR_MAPPER, used repos in ~/.local/state/nerdr/repos, claude as the first pane.
+
+## [2026-11-25] fix | cell backgrounds covered block elements (#27)
+Backgrounds are painted before other rects; the Claude Code mascot body was a black square.
