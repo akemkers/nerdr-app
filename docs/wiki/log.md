@@ -47,3 +47,6 @@ prefix+f: repo popup over NERDR_MAPPER, used repos in ~/.local/state/nerdr/repos
 
 ## [2026-11-25] fix | cell backgrounds covered block elements (#27)
 Backgrounds are painted before other rects; the Claude Code mascot body was a black square.
+
+## [2026-11-25] add | new task in its own worktree (#23)
+Name step in the prefix+f popup; worktree.rs wraps git (fetch, worktree add from origin/main or an existing branch) under NERDR_WORKTREES.
