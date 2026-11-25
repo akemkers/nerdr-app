@@ -883,6 +883,8 @@ fn build_frame(
             size(px(w as f32 * cw), px(ch)),
         )
     };
+    // Backgrounds go first: a run is flushed after the block elements and underlines on it
+    let mut bgs: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let mut rects: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let mut paths = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
@@ -900,9 +902,9 @@ fn build_frame(
         let selection = content.selection;
         // A background run waiting to be merged with the next cell: (row, start col, end col, color)
         let mut bg_run: Option<(usize, usize, usize, Rgb)> = None;
-        let flush_bg = |run: Option<(usize, usize, usize, Rgb)>, rects: &mut Vec<_>| {
+        let flush_bg = |run: Option<(usize, usize, usize, Rgb)>, bgs: &mut Vec<_>| {
             if let Some((row, a, b, c)) = run {
-                rects.push((cell_rect(a, row, b - a), hsla(c)));
+                bgs.push((cell_rect(a, row, b - a), hsla(c)));
             }
         };
 
@@ -962,12 +964,12 @@ fn build_frame(
                 match &mut bg_run {
                     Some((r, _, end, c)) if *r == row && *end == col && *c == bg => *end += width,
                     _ => {
-                        flush_bg(bg_run.take(), &mut rects);
+                        flush_bg(bg_run.take(), &mut bgs);
                         bg_run = Some((row, col, col + width, bg));
                     }
                 }
             } else {
-                flush_bg(bg_run.take(), &mut rects);
+                flush_bg(bg_run.take(), &mut bgs);
             }
             let hovered = hover_link.is_some() && cell.hyperlink().as_ref() == hover_link;
             if flags.intersects(Flags::ALL_UNDERLINES) || hovered {
@@ -1053,7 +1055,7 @@ fn build_frame(
             }
             seg.cells += width;
         }
-        flush_bg(bg_run.take(), &mut rects);
+        flush_bg(bg_run.take(), &mut bgs);
     }
 
     // Shape outside the lock, so the reader isn't held up
@@ -1112,8 +1114,9 @@ fn build_frame(
         let bg = Bounds::new(origin, size(shaped.width, px(ch)));
         composing = Some((bg, origin, shaped));
     }
+    bgs.extend(rects);
     Frame {
-        rects,
+        rects: bgs,
         paths,
         lines,
         cursor,
