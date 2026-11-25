@@ -23,6 +23,7 @@ use crate::repos;
 use crate::tasks::{Addressed, Tab, Task, Tasks};
 use crate::theme::{self, hsla};
 use crate::view::{Metrics, TermEvent, TerminalView};
+use crate::worktree;
 
 pub const DOC: &str = "nerdr";
 /// Every terminal nerdr starts carries this label.
@@ -59,6 +60,14 @@ pub fn shell_params(cwd: &str, cols: u16, rows: u16, display: &Value) -> Value {
 
 pub fn home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".into())
+}
+
+/// A `~` path in full.
+fn untilde(path: &str) -> String {
+    match path.strip_prefix('~') {
+        Some(rest) => format!("{}{rest}", home()),
+        None => path.to_string(),
+    }
 }
 
 /// A path with `~` for the home folder.
@@ -118,7 +127,7 @@ pub fn load(
         let a = run["address"].as_str().context("terminal.run: no address")?;
         eprintln!("nerdr: started {a}");
         info.insert(a.to_string(), json!({"address": a, "cwd": home()}));
-        layout.add_task(home(), a.to_string());
+        layout.add_task(home(), None, a.to_string());
     }
     Ok((layout, version, info))
 }
@@ -152,6 +161,68 @@ struct Picker {
     selected: usize,
     /// The repos used before, most recent first, as `~` paths.
     used: Vec<String>,
+    /// The name step, once a repo is picked.
+    naming: Option<Naming>,
+}
+
+struct Naming {
+    /// The picked repo, a `~` path.
+    repo: String,
+    name: String,
+    /// The name is the generated one, untouched: typing replaces it.
+    generated: bool,
+    /// Start in the repo itself, not in a new worktree.
+    in_repo: bool,
+    /// The worktree is being made.
+    busy: bool,
+    /// What went wrong.
+    error: Option<String>,
+}
+
+/// The popup's name step: the repo, the name, and new worktree or in the repo.
+fn render_naming(n: &Naming) -> gpui::Div {
+    let dim = hsla(theme::MUTED);
+    let row = |label: &'static str| {
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(8.))
+            .px(px(8.))
+            .child(div().w(px(56.)).text_color(dim).child(label))
+    };
+    // One text with the cursor, so the row's gap doesn't come between them
+    let cursor = if n.busy { "" } else { "▏" };
+    let selected = gpui::HighlightStyle {
+        background_color: Some(hsla(theme::SIDEBAR_SELECTED)),
+        ..Default::default()
+    };
+    let name = gpui::StyledText::new(format!("{}{cursor}", n.name))
+        .with_highlights(n.generated.then(|| (0..n.name.len(), selected)));
+    let mode = |label: &'static str, on: bool| div().when(!on, |d| d.text_color(dim)).child(label);
+    let note = if n.busy {
+        Some(("lager worktree …".to_string(), dim))
+    } else if let Some(e) = &n.error {
+        Some((e.clone(), hsla(theme::RED)))
+    } else {
+        // What the typed name becomes
+        worktree::branch_name(&n.name)
+            .filter(|b| *b != n.name && !n.in_repo)
+            .map(|b| (format!("blir {b}"), dim))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(row("repo").child(n.repo.clone()))
+        .child(
+            row("start")
+                .child(mode("worktree", !n.in_repo))
+                .child(div().text_color(dim).child("|"))
+                .child(mode("start i main", n.in_repo))
+                .child(div().text_color(dim).child("(tab)")),
+        )
+        .when(!n.in_repo, |d| d.child(row("branch").child(div().whitespace_nowrap().child(name))))
+        .children(note.map(|(t, c)| div().px(px(8.)).text_color(c).child(t)))
 }
 
 /// So many hits show in the popup.
@@ -591,6 +662,9 @@ impl Workspace {
     }
 
     fn picker_key(&mut self, k: &gpui::Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.as_ref().is_some_and(|p| p.naming.is_some()) {
+            return self.naming_key(k, window, cx);
+        }
         let hits = self.picker_hits();
         let Some(p) = &mut self.picker else {
             return;
@@ -601,7 +675,7 @@ impl Workspace {
             ("enter", _) => {
                 if let Some((i, _)) = hits.get(p.selected) {
                     let repo = self.repos[*i].clone();
-                    self.start_task(repo, window, cx);
+                    self.pick_repo(repo, cx);
                 }
                 return;
             }
@@ -622,14 +696,108 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A new task with `repo` (a `~` path) as its origin and the agent in its first pane.
-    fn start_task(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.picker = None;
-        let origin = match repo.strip_prefix('~') {
-            Some(rest) => format!("{}{rest}", home()),
-            None => repo,
+    /// On to the name step, with a generated name.
+    fn pick_repo(&mut self, repo: String, cx: &mut Context<Self>) {
+        if let Some(p) = &mut self.picker {
+            p.naming = Some(Naming {
+                repo,
+                name: worktree::generate_name(),
+                generated: true,
+                in_repo: false,
+                busy: false,
+                error: None,
+            });
+        }
+        cx.notify();
+    }
+
+    fn naming_key(&mut self, k: &gpui::Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.picker else {
+            return;
         };
-        repos::mark_used(std::path::Path::new(&home()), &origin);
+        let Some(n) = &mut p.naming else {
+            return;
+        };
+        let m = &k.modifiers;
+        match k.key.as_str() {
+            // The worktree is still made, and its task started
+            "escape" if n.busy => return self.close_picker(window, cx),
+            "escape" => p.naming = None,
+            _ if n.busy => return,
+            "tab" => n.in_repo = !n.in_repo,
+            "enter" if n.in_repo => {
+                let repo = untilde(&n.repo);
+                self.picker = None;
+                return self.start_task(repo.clone(), repo, None, window, cx);
+            }
+            "enter" => match worktree::branch_name(&n.name) {
+                Some(branch) => return self.make_worktree(branch, window, cx),
+                None => n.error = Some("navnet blir ikke et gyldig branch-navn".into()),
+            },
+            "backspace" => {
+                if std::mem::take(&mut n.generated) {
+                    n.name.clear();
+                } else {
+                    n.name.pop();
+                }
+            }
+            _ => match &k.key_char {
+                Some(t) if !m.control && !m.platform && !t.chars().any(char::is_control) => {
+                    if std::mem::take(&mut n.generated) {
+                        n.name.clear();
+                    }
+                    n.name.push_str(t);
+                    n.error = None;
+                }
+                _ => {}
+            },
+        }
+        cx.notify();
+    }
+
+    /// Makes the worktree in the background, then starts the task in it. The popup shows
+    /// what went wrong.
+    fn make_worktree(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(n) = self.picker.as_mut().and_then(|p| p.naming.as_mut()) else {
+            return;
+        };
+        n.busy = true;
+        n.error = None;
+        let repo = untilde(&n.repo);
+        let root = worktree::root(std::path::Path::new(&home()));
+        let from = std::path::PathBuf::from(&repo);
+        let make = cx.background_spawn(async move { worktree::create(&from, &root, &branch) });
+        cx.spawn_in(window, async move |this, cx| {
+            let made = make.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let waiting = this.picker.as_mut().and_then(|p| p.naming.as_mut()).filter(|n| n.busy);
+                match made {
+                    Ok(made) => {
+                        if waiting.is_some() {
+                            this.picker = None;
+                        }
+                        let origin = made.path.to_string_lossy().into_owned();
+                        this.start_task(origin, repo, Some(made.base), window, cx);
+                    }
+                    Err(e) => match waiting {
+                        Some(n) => {
+                            n.busy = false;
+                            n.error = Some(format!("{e:#}"));
+                        }
+                        None => eprintln!("nerdr: new worktree: {e:#}"),
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// A new task in `origin` with the agent in its first pane. `repo` is the repo it's
+    /// from, `base` as in `Task`.
+    fn start_task(&mut self, origin: String, repo: String, base: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        repos::mark_used(std::path::Path::new(&home()), &repo);
         let (cols, rows) = self.grid_size(window);
         let mut params = shell_params(&origin, cols, rows, &self.display);
         params["argv"] = json!(["claude"]);
@@ -645,7 +813,7 @@ impl Workspace {
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(address) = address {
                     let pane = this.open_pane(address, window, cx);
-                    this.tasks.add_task(origin, pane);
+                    this.tasks.add_task(origin, base, pane);
                 }
                 this.shown(window, cx);
             });
@@ -656,6 +824,9 @@ impl Workspace {
 
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.picker.as_ref()?;
+        if let Some(n) = &p.naming {
+            return Some(self.popup(render_naming(n)));
+        }
         let dim = hsla(theme::MUTED);
         let hits = self.picker_hits();
         // A window of rows that keeps the selected one in view
@@ -678,7 +849,7 @@ impl Workspace {
                     .overflow_hidden()
                     .when(row == p.selected, |d| d.bg(hsla(theme::SIDEBAR_SELECTED)))
                     .child(label)
-                    .on_click(cx.listener(move |this, _, window, cx| this.start_task(text.clone(), window, cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_repo(text.clone(), cx))),
             );
         }
         let note = if self.searching {
@@ -696,6 +867,18 @@ impl Workspace {
             .pb(px(6.))
             .child(div().text_color(dim).child("ny oppgave"))
             .child(div().child(format!("{}▏", p.query)));
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(input)
+            .child(list)
+            .children(note.map(|n| div().px(px(8.)).text_color(dim).child(n)));
+        Some(self.popup(body))
+    }
+
+    /// A panel over the panes, near the top.
+    fn popup(&self, body: gpui::Div) -> AnyElement {
         let panel = div()
             .occlude()
             .w(px(640.))
@@ -710,20 +893,16 @@ impl Workspace {
             .font_family(self.metrics.font.family.clone())
             .text_size(px(14.))
             .text_color(hsla(theme::FG))
-            .child(input)
-            .child(list)
-            .children(note.map(|n| div().px(px(8.)).text_color(dim).child(n)));
-        Some(
-            div()
-                .absolute()
-                .top(px(60.))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(panel)
-                .into_any_element(),
-        )
+            .child(body);
+        div()
+            .absolute()
+            .top(px(60.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(panel)
+            .into_any_element()
     }
 
     fn on_notice(&mut self, n: hc::Notice, cx: &mut Context<Self>) {

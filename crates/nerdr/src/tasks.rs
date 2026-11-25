@@ -35,6 +35,9 @@ pub struct Task<P> {
     pub id: String,
     /// The folder the task starts from: new tabs start here.
     pub origin: String,
+    /// When the origin is a worktree nerdr made: the commit its branch was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     pub tabs: Vec<Tab<P>>,
     #[serde(default)]
     pub active: usize,
@@ -132,10 +135,11 @@ impl<P: Addressed> Tab<P> {
 }
 
 impl<P: Addressed> Task<P> {
-    pub fn new(origin: String, pane: P) -> Self {
+    pub fn new(origin: String, base: Option<String>, pane: P) -> Self {
         Self {
             id: task_id(),
             origin,
+            base,
             tabs: vec![Tab::new(pane)],
             active: 0,
             last: None,
@@ -251,16 +255,16 @@ impl<P: Addressed> Tasks<P> {
         Ok(())
     }
 
-    /// A new task with one tab, shown.
-    pub fn add_task(&mut self, origin: String, pane: P) {
-        self.tasks.push(Task::new(origin, pane));
+    /// A new task with one tab, shown. `base` as in `Task`.
+    pub fn add_task(&mut self, origin: String, base: Option<String>, pane: P) {
+        self.tasks.push(Task::new(origin, base, pane));
         self.select(self.tasks.len() - 1, None);
     }
 
     /// A tab in the active task, or a task with that origin when there is none.
     pub fn add(&mut self, origin: String, pane: P) {
         if let Err(pane) = self.add_tab(pane) {
-            self.add_task(origin, pane);
+            self.add_task(origin, None, pane);
         }
     }
 
@@ -342,6 +346,7 @@ impl<P: Addressed> Tasks<P> {
                 Some(Task {
                     id: t.id,
                     origin: t.origin,
+                    base: t.base,
                     tabs,
                     active,
                     last: t.last,
@@ -363,6 +368,7 @@ impl<P: Addressed> Tasks<P> {
                 .map(|t| Task {
                     id: t.id.clone(),
                     origin: t.origin.clone(),
+                    base: t.base.clone(),
                     tabs: t
                         .tabs
                         .iter()
@@ -391,7 +397,7 @@ mod tests {
     fn tasks(spec: &[(&str, &[&str], usize)], active: usize) -> Tasks<String> {
         let mut out = Tasks::default();
         for (origin, tabs, a) in spec {
-            out.add_task(origin.to_string(), tabs[0].to_string());
+            out.add_task(origin.to_string(), None, tabs[0].to_string());
             for t in &tabs[1..] {
                 out.add_tab(t.to_string()).unwrap();
             }
@@ -422,7 +428,7 @@ mod tests {
     fn new_tabs_start_in_the_origin() {
         let mut t = tasks(&[("/repo", &["t1"], 0)], 0);
         assert_eq!(t.new_tab_dir(), Some("/repo"));
-        t.add_task("/other".into(), "t2".into());
+        t.add_task("/other".into(), None, "t2".into());
         assert_eq!(t.new_tab_dir(), Some("/other"));
         // A tab added to a task keeps that task's origin
         t.add_tab("t3".into()).unwrap();
@@ -507,12 +513,16 @@ mod tests {
     #[test]
     fn saved_form_round_trips_origin_and_splits() {
         let mut t = tasks(&[("/a", &["t1"], 0), ("/b", &["t2"], 0)], 1);
+        t.tasks[1].base = Some("abc123".into());
         t.split("t2", Dir::Vertical, "t3".into()).unwrap();
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["tasks"][1]["origin"], "/b");
+        assert_eq!(v["tasks"][1]["base"], "abc123");
+        assert!(v["tasks"][0].get("base").is_none());
         assert_eq!(v["tasks"][1]["tabs"][0], json!({"panes": {"split": "vertical", "ratio": 0.5, "a": "t2", "b": "t3"}, "active": "t3"}));
         let back: Tasks<String> = serde_json::from_value(v).unwrap();
         assert_eq!(shape(&back), shape(&t));
+        assert_eq!(back.tasks[1].base.as_deref(), Some("abc123"));
     }
 
     #[test]

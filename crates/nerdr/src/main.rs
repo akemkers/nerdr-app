@@ -13,6 +13,7 @@ mod tasks;
 mod theme;
 mod view;
 mod workspace;
+mod worktree;
 
 use std::borrow::Cow;
 
