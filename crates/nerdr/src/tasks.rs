@@ -44,6 +44,9 @@ pub struct Task<P> {
     /// The tab active before this one, for tmux's last-window.
     #[serde(skip)]
     last: Option<u64>,
+    /// The diff overlay covers the tabs. Kept while another task shows.
+    #[serde(skip)]
+    pub diff: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -143,6 +146,7 @@ impl<P: Addressed> Task<P> {
             tabs: vec![Tab::new(pane)],
             active: 0,
             last: None,
+            diff: false,
         }
     }
 
@@ -173,8 +177,12 @@ impl<P: Addressed> Tasks<P> {
         self.active_tab()?.active_pane()
     }
 
-    /// The panes on screen: the active tab's, or only its active pane when zoomed.
+    /// The panes on screen: the active tab's, or only its active pane when zoomed. None
+    /// under the diff overlay.
     pub fn visible_panes(&self) -> Vec<&P> {
+        if self.diff_shown() {
+            return Vec::new();
+        }
         match self.active_tab() {
             Some(t) if t.zoomed => t.active_pane().into_iter().collect(),
             Some(t) => t.panes.leaves(),
@@ -213,19 +221,43 @@ impl<P: Addressed> Tasks<P> {
         true
     }
 
-    /// Shows a task, and one of its tabs if given.
+    /// Shows a task, and one of its tabs if given. A tab given leaves the diff overlay;
+    /// otherwise the task shows as it was left.
     pub fn select(&mut self, task: usize, tab: Option<usize>) {
         let Some(t) = self.tasks.get_mut(task) else {
             return;
         };
-        if let Some(i) = tab
-            && i < t.tabs.len()
-            && i != t.active
-        {
-            t.last = t.active_tab().map(|t| t.id);
-            t.active = i;
+        if let Some(i) = tab {
+            t.diff = false;
+            if i < t.tabs.len() && i != t.active {
+                t.last = t.active_tab().map(|t| t.id);
+                t.active = i;
+            }
         }
         self.active = task;
+    }
+
+    /// The active task's diff overlay is up.
+    pub fn diff_shown(&self) -> bool {
+        self.active_task().is_some_and(|t| t.diff)
+    }
+
+    /// Opens or leaves the active task's diff overlay. Its id, when there's a task.
+    pub fn toggle_diff(&mut self) -> Option<&str> {
+        let t = self.tasks.get_mut(self.active)?;
+        t.diff = !t.diff;
+        Some(&t.id)
+    }
+
+    /// Back to the active task's tabs. False if they were showing.
+    pub fn hide_diff(&mut self) -> bool {
+        match self.tasks.get_mut(self.active) {
+            Some(t) if t.diff => {
+                t.diff = false;
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn cycle_tab(&mut self, d: isize) {
@@ -359,6 +391,7 @@ impl<P: Addressed> Tasks<P> {
                     tabs,
                     active,
                     last: t.last,
+                    diff: t.diff,
                 })
             })
             .collect();
@@ -391,6 +424,7 @@ impl<P: Addressed> Tasks<P> {
                         .collect(),
                     active: t.active,
                     last: t.last,
+                    diff: t.diff,
                 })
                 .collect(),
             active: self.active,
@@ -505,6 +539,27 @@ mod tests {
         t.split("t1", Dir::Horizontal, "t2".into()).unwrap();
         assert_eq!(t.neighbor(Side::Left).map(String::as_str), Some("t1"));
         assert_eq!(t.neighbor(Side::Right), None);
+    }
+
+    #[test]
+    fn each_task_keeps_its_diff_overlay() {
+        let mut t = tasks(&[("/a", &["t1", "t2"], 0), ("/b", &["t3"], 0)], 0);
+        assert!(t.toggle_diff().is_some());
+        assert!(t.diff_shown() && t.visible_panes().is_empty());
+        // Switching task hides it without closing it
+        t.cycle_task(1);
+        assert!(!t.diff_shown());
+        assert_eq!(t.visible_panes(), ["t3"]);
+        t.select(0, None);
+        assert!(t.diff_shown());
+        // A tab picked leaves it
+        t.cycle_tab(1);
+        assert!(!t.diff_shown());
+        t.toggle_diff();
+        assert!(t.hide_diff() && !t.hide_diff());
+        t.toggle_diff();
+        t.toggle_diff();
+        assert!(!t.diff_shown());
     }
 
     #[test]
