@@ -7,6 +7,7 @@ nerdr:
 - [[rendering]]: font and cell size, colors, box drawing, cursor and overlays, and why
 - [[window]]: window size and the fixed title, and why
 - [[testing]]: how an agent tests nerdr without touching the user's terminals, and what to hand to the user
+- [[jetdiff]]: the diff overlay: jetdiff embedded, its keys, config and quit, and why the first open blocks
 - [[agent]]: the agent's status from hc (OSC 7501), done until seen, and the hooks tried before
 
 Systems around nerdr:

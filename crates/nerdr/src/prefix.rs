@@ -95,7 +95,16 @@ pub enum Action {
     PrevTask,
     ScrollPageUp,
     SendPrefix,
+    /// Opens or leaves the active task's diff overlay.
+    Diff,
     Quit,
+}
+
+impl Action {
+    /// Acts on the task's terminals, so the diff overlay goes first.
+    pub fn on_terminals(self) -> bool {
+        !matches!(self, Action::NewTask | Action::NextTask | Action::PrevTask | Action::Diff | Action::Quit)
+    }
 }
 
 /// The key after the prefix as tmux names it: the character it typed when it typed one
@@ -243,8 +252,10 @@ impl Keys {
 
     /// What the key after the prefix does: nerdr's own keys, else the tmux table.
     pub fn action(&self, key: &str) -> Option<Binding> {
-        if key == "f" {
-            return Some(Binding::new(Action::NewTask, false));
+        match key {
+            "f" => return Some(Binding::new(Action::NewTask, false)),
+            "d" => return Some(Binding::new(Action::Diff, false)),
+            _ => {}
         }
         match &self.table {
             Some(table) => table.get(key).cloned(),
@@ -438,9 +449,9 @@ pub fn default_action(key: &str, base: usize) -> Option<Action> {
         ")" => Action::NextTask,
         "(" => Action::PrevTask,
         "PPage" => Action::ScrollPageUp,
-        "d" => Action::Quit,
-        // nerdr's own, as in the tmux nerdr: a new task where tmux would make a session
+        // nerdr's own: a new task where tmux would make a session, the diff for detach
         "f" => Action::NewTask,
+        "d" => Action::Diff,
         d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
             let n = (d.as_bytes()[0] - b'0') as usize;
             Action::SelectTab(n.checked_sub(base)?)
@@ -455,6 +466,16 @@ mod tests {
 
     fn ks(s: &str) -> Keystroke {
         Keystroke::parse(s).unwrap()
+    }
+
+    #[test]
+    fn terminal_actions_leave_the_diff_overlay() {
+        for a in [Action::NewTab, Action::Split(Dir::Vertical), Action::SelectPane(Side::Left), Action::Zoom, Action::NextTab] {
+            assert!(a.on_terminals(), "{a:?}");
+        }
+        for a in [Action::Diff, Action::NewTask, Action::NextTask, Action::PrevTask] {
+            assert!(!a.on_terminals(), "{a:?}");
+        }
     }
 
     #[test]
@@ -529,6 +550,7 @@ bind-key    -T prefix r       source-file ~/.tmux.conf \; display-message "reloa
         assert!(t["C-Up"].repeat && !t["X"].repeat);
         let keys = Keys { base_index: 1, table: Some(t), ..Keys::default() };
         assert_eq!(keys.action("f").map(|b| b.action), Some(Action::NewTask));
+        assert_eq!(keys.action("d").map(|b| b.action), Some(Action::Diff));
         assert!(keys.action("c").is_none());
     }
 

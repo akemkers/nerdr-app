@@ -53,3 +53,6 @@ Name step in the prefix+f popup; worktree.rs wraps git (fetch, worktree add from
 
 ## [2026-11-25] add | agent status from hc, done until seen (#24)
 agent: the status is hc's OSC 7501, done stays green until seen. Hooks via `--settings`, "Agent mangler" and restart were built, then dropped on the user's wish; what they taught is kept. hc: labels events and the terminal's environment. testing: a real Claude in a test session.
+
+## [2026-11-25] add | diff overlay on prefix+d (#21)
+jetdiff v0.3.0 as a git dep; one RepoView per task, its keys under jetdiff's key context, Quit leaves it. First open is on the main thread since RepoSource isn't Send.

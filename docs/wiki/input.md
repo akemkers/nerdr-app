@@ -1,6 +1,6 @@
 ---
 sources: [commits ad6910a 57f03e4 2712d18 28d7583 a040014 c0bb232, crates/nerdr/src/keys.rs, crates/nerdr/src/ime.rs, crates/nerdr/src/view.rs]
-updated: 2026-11-19
+updated: 2026-11-25
 ---
 # Input in nerdr
 
@@ -26,7 +26,7 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - Why a prefix and no modifier shortcuts: nothing is taken from the program in the terminal, and option/alt/cmd stay free on every platform (the macOS collisions above are gone).
 - A key after the prefix is matched by the character it types (`key_char`), as tmux names keys, so `&` `(` `)` work on Norwegian layouts where they are shift+digit. `prefix.rs`.
 - The prefix pressed twice sends it to the program, like tmux's `send-prefix`.
-- The prefix, `base-index` and the bindings come from the running tmux server (`show-options -gv prefix`, `show-options -gv base-index`, `list-keys -T prefix`), as the tmux nerdr does, so the user's own bindings work (`X` closes a tab, the unbound `&` does nothing). kill-pane (`x`) also closes the tab while a tab is one pane, as in tmux when the last pane goes. tmux commands map to actions in `prefix.rs` (`command_action`); `f` is always nerdr's new task. `NERDR_PREFIKS` overrides the prefix, the same variable as in the tmux nerdr so one setting covers both.
+- The prefix, `base-index` and the bindings come from the running tmux server (`show-options -gv prefix`, `show-options -gv base-index`, `list-keys -T prefix`), as the tmux nerdr does, so the user's own bindings work (`X` closes a tab, the unbound `&` does nothing). kill-pane (`x`) also closes the tab while a tab is one pane, as in tmux when the last pane goes. tmux commands map to actions in `prefix.rs` (`command_action`); `f` is always nerdr's new task, and `d` the diff overlay (tmux's `detach-client`; nerdr's terminals outlive the app anyway). `NERDR_PREFIKS` overrides the prefix, the same variable as in the tmux nerdr so one setting covers both.
 - Rejected: starting a tmux server to read `tmux.conf` when none runs, because that runs the user's plugins too (tpm, continuum's session restore). Without a running tmux the defaults apply. Also rejected: parsing `tmux.conf` ourselves, since tmux's own parser is the only exact one.
 - `NERDR_DEBUG=1` logs the prefix, base-index and the mapped bindings at start.
 - Splits are tmux's: `split-window -h` side by side, `-v` (or no flag) one above the other, `kill-pane` closes the pane and the tab with its last pane. A new pane always starts in the active pane's directory, as with the user's `-c "#{pane_current_path}"`; tmux without `-c` would use the session's directory, which nerdr doesn't have.
@@ -37,6 +37,7 @@ How keyboard and mouse input reaches the program, and why it is built this way. 
 - tmux's `-r` works: after a repeatable key, more of them work without the prefix for `repeat-time` (500 ms), read from tmux. Any other key ends it and goes to the program, as in tmux.
 - tmux's root table (`bind -n`) works too: the user's `M-arrows` resize without the prefix. Root bindings nerdr can't run (other `if-shell`s, mouse bindings) are left out, so those keys reach the program.
 - tmux 3.8 writes its defaults for `C-`/`M-Up` and `Left` as `if-shell -F "#{?floating_pane_flag}" { floating } { tiled }`. nerdr has no floating panes, so it reads the second block. Without this only Down and Right resized.
+- In the diff overlay only the prefix is nerdr's: no root bindings and no repeat, so `C-h/j/k/l` move between jetdiff's panels and its keys work. After the prefix, `d` leaves; the actions on terminals (new tab, tabs, splits, select-pane, zoom, resize, scroll, send-prefix) leave it first and then act; new task and next/previous task don't. Escape stays jetdiff's (it hides its help). `Action::on_terminals`. See [[jetdiff]].
 - Copy and paste stay ctrl+shift+c/v for now; tmux's copy mode (`[`) isn't built.
 
 ## Mouse and clipboard

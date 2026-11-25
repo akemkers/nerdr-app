@@ -43,10 +43,11 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(16.);
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(jetdiff_ui::Assets).run(move |cx: &mut App| {
         cx.text_system()
             .add_fonts(FONTS.map(Cow::Borrowed).to_vec())
             .expect("the built-in font should load");
+        diff_setup(cx);
         let bounds = Bounds::centered(None, size(px(1000.), px(680.)), cx);
         let opened = cx.open_window(
             WindowOptions {
@@ -84,6 +85,17 @@ fn main() {
         cx.on_window_closed(|cx| cx.quit()).detach();
         cx.activate(true);
     });
+}
+
+/// jetdiff for the diff overlay, with the settings from the user's jetdiff config. Its keys
+/// apply only inside the overlay.
+fn diff_setup(cx: &mut App) {
+    jetdiff_ui::load_font(cx);
+    cx.bind_keys(jetdiff_ui::key_bindings());
+    match jetdiff_app::config::load() {
+        Ok(config) => cx.set_global(jetdiff_ui::Settings::new(&config, env!("CARGO_PKG_VERSION"))),
+        Err(e) => eprintln!("nerdr: jetdiff config: {e}"),
+    }
 }
 
 fn connect() -> Result<hc::Client> {

@@ -14,6 +14,7 @@ use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, KeyDownEvent, Render, Subscription,
     Window, div, prelude::*, px, relative,
 };
+use jetdiff_ui::RepoView;
 use serde_json::{Value, json};
 
 use crate::seen::Seen;
@@ -258,6 +259,10 @@ pub struct Workspace {
     /// The window has the system's focus: what shows in it is seen.
     window_active: bool,
     seen: Seen,
+    /// Each task's diff overlay by task id, made the first time it opens.
+    diffs: HashMap<String, Entity<RepoView>>,
+    /// A message over the panes until the next key.
+    notice: Option<String>,
     _tasks: Vec<gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -303,6 +308,8 @@ impl Workspace {
             searching: false,
             window_active: window.is_window_active(),
             seen: Seen::default(),
+            diffs: HashMap::new(),
+            notice: None,
             _tasks: vec![feed],
             _subs: vec![
                 cx.observe_window_bounds(window, Self::on_bounds),
@@ -408,6 +415,9 @@ impl Workspace {
     }
 
     pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.shown_diff() {
+            return window.focus(&d.focus_handle(cx));
+        }
         match self.tasks.active_pane() {
             Some(p) => window.focus(&p.view.focus_handle(cx)),
             None => window.focus(&self.focus),
@@ -528,6 +538,54 @@ impl Workspace {
         self.shown(window, cx);
     }
 
+    /// The active task's diff overlay, when it covers the tabs.
+    fn shown_diff(&self) -> Option<&Entity<RepoView>> {
+        let t = self.tasks.active_task().filter(|t| t.diff)?;
+        self.diffs.get(&t.id)
+    }
+
+    /// After the diff overlay came or went. Not saved: it lives while the app runs.
+    fn diff_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_active(window, cx);
+        self.track_seen();
+        cx.notify();
+    }
+
+    /// prefix+d: the active task's diff overlay, read from its origin the first time.
+    fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.tasks.active_task() else {
+            return;
+        };
+        if t.diff || self.diffs.contains_key(&t.id) {
+            self.tasks.toggle_diff();
+            return self.diff_changed(window, cx);
+        }
+        if !cx.has_global::<jetdiff_ui::Settings>() {
+            self.notice = Some("jetdiff-configen kunne ikke leses, se feilen i terminalen".into());
+            return cx.notify();
+        }
+        let id = t.id.clone();
+        let origin = t.origin.clone();
+        // On this thread: jetdiff's RepoSource can't be sent from another. Only the first
+        // open reads; jetdiff runs its later reads in the background itself.
+        match jetdiff_app::RepoSource::open(std::path::Path::new(&origin)) {
+            Ok((source, commits)) => {
+                let view = cx.new(|cx| RepoView::new(source, Some(commits), cx));
+                self.diffs.insert(id, view);
+                self.tasks.toggle_diff();
+            }
+            Err(e) => self.notice = Some(format!("ingen diff for {}: {e}", tilde(&origin))),
+        }
+        self.diff_changed(window, cx);
+    }
+
+    /// Back to the active task's tabs.
+    fn hide_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tasks.hide_diff() {
+            self.diff_changed(window, cx);
+        }
+    }
+
     /// Where a pane's program is, for panes split from it.
     fn cwd_of(&self, address: &str) -> String {
         self.info
@@ -645,6 +703,8 @@ impl Workspace {
             return;
         }
         self.tasks.remove_pane(address);
+        let tasks = &self.tasks.tasks;
+        self.diffs.retain(|id, _| tasks.iter().any(|t| t.id == *id));
         self.save(cx);
         if self.tasks.is_empty() {
             // Let the save go out before quitting
@@ -917,6 +977,12 @@ impl Workspace {
         Some(self.popup(body))
     }
 
+    fn render_notice(&self) -> Option<AnyElement> {
+        let n = self.notice.as_ref()?;
+        let hint = div().text_color(hsla(theme::MUTED)).child("en tast lukker");
+        Some(self.popup(div().px(px(8.)).flex().flex_col().gap(px(4.)).child(n.clone()).child(hint)))
+    }
+
     /// A panel over the panes, near the top.
     fn popup(&self, body: gpui::Div) -> AnyElement {
         let panel = div()
@@ -1006,7 +1072,21 @@ impl Workspace {
             self.picker_key(k, window, cx);
             return;
         }
+        if self.notice.take().is_some() {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let name = prefix::key_name(k);
+        // In the diff overlay only the prefix is ours; the rest are jetdiff's
+        if !self.prefix_armed && self.shown_diff().is_some() {
+            if self.keys.prefix.matches(k) {
+                self.prefix_armed = true;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
         if !self.prefix_armed {
             let repeating = self.repeat_until.take().is_some_and(|t| Instant::now() < t);
             let binding = self.keys.action(&name).filter(|b| b.repeat && repeating);
@@ -1048,6 +1128,9 @@ impl Workspace {
     }
 
     fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        if action.on_terminals() {
+            self.hide_diff(window, cx);
+        }
         match action {
             Action::NewTab => self.new_tab(window, cx),
             Action::NewTask => self.open_picker(window, cx),
@@ -1089,6 +1172,7 @@ impl Workspace {
                     p.view.update(cx, |v, cx| v.type_keystroke(&ks, cx));
                 }
             }
+            Action::Diff => self.toggle_diff(window, cx),
             Action::Quit => cx.quit(),
         }
     }
@@ -1316,17 +1400,28 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panes = self.tasks.active_tab().map(|t| match t.active_pane() {
-            Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
-            _ => self.render_panes(t, &t.panes, Vec::new(), cx),
-        });
+        let panes = match self.shown_diff() {
+            Some(d) => Some(
+                div()
+                    .size_full()
+                    .child(d.clone())
+                    // jetdiff leaves its quit keys to whoever shows it
+                    .on_action(cx.listener(|this, _: &jetdiff_ui::Quit, window, cx| this.hide_diff(window, cx)))
+                    .into_any_element(),
+            ),
+            None => self.tasks.active_tab().map(|t| match t.active_pane() {
+                Some(p) if t.zoomed => div().size_full().child(p.view.clone()).into_any_element(),
+                _ => self.render_panes(t, &t.panes, Vec::new(), cx),
+            }),
+        };
         let main = div()
             .relative()
             .flex_1()
             .h_full()
             .overflow_hidden()
             .children(panes)
-            .children(self.render_picker(cx));
+            .children(self.render_picker(cx))
+            .children(self.render_notice());
         div()
             .size_full()
             .flex()

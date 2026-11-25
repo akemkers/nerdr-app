@@ -9,6 +9,8 @@ alacritty_terminal = "0.26.0"
 anyhow = "1"
 futures = "0.3"
 gpui.workspace = true
+jetdiff-app = { git = "https://github.com/akemkers/jetdiff", tag = "v0.3.0" }
+jetdiff-ui = { git = "https://github.com/akemkers/jetdiff", tag = "v0.3.0" }
 serde.workspace = true
 serde_json.workspace = true
 regex = "1"
