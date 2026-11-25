@@ -17,7 +17,7 @@ How nerdr knows what a task's agent is doing. Spec: issue #24 (parent #18).
 
 - Done is green only until seen (`seen.rs`, kept in nerdr): a pane that gets done while it isn't on screen, or the window isn't active, stays green until it has been on screen with the window active, then grey. On screen: the active tab's panes, or only the zoomed one (`Tasks::visible_panes`). Checked on window activation, task or tab switches, focus and every hc event. The user's wish, 2026-11-25: after reading the answer there may be nothing more to do.
 - Kept locally because nerdr can't reset hc's status. After a restart every done pane off screen is green again.
-- No status text in the sidebar: the dot is enough (the user, 2026-11-25).
+- No status text in the sidebar: the dot is enough (the user, 2026-11-25). Its age is on the card ([[sidebar]]).
 
 ## Dropped
 

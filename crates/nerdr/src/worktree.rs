@@ -51,6 +51,31 @@ pub fn create(repo: &Path, root: &Path, name: &str) -> Result<Made> {
     Ok(Made { path, base })
 }
 
+/// What a folder has checked out, as git has it now.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Checkout {
+    /// The repo's main folder, also for a worktree of it.
+    pub repo: PathBuf,
+    /// The branch, or the commit when detached.
+    pub branch: String,
+    /// A linked worktree, not the repo's main folder.
+    pub worktree: bool,
+}
+
+/// None when `dir` isn't in a git repo. Blocking.
+pub fn checkout(dir: &Path) -> Option<Checkout> {
+    // The main worktree comes first
+    let list = git(dir, &["worktree", "list", "--porcelain"]).ok()?;
+    let repo = list.lines().next()?.strip_prefix("worktree ")?.into();
+    let branch = git(dir, &["symbolic-ref", "-q", "--short", "HEAD"])
+        .or_else(|_| git(dir, &["rev-parse", "--short", "HEAD"]))
+        .ok()?;
+    let dirs = git(dir, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]).ok()?;
+    let mut dirs = dirs.lines();
+    let worktree = dirs.next() != dirs.next();
+    Some(Checkout { repo, branch, worktree })
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -240,6 +265,27 @@ mod tests {
         assert_eq!(r.git("worktrees/repo/my-work", &["rev-parse", "HEAD"]), work);
         // Made from the commit it branched off main at
         assert_eq!(made.base, main);
+    }
+
+    #[test]
+    fn checkout_reads_the_repo_and_the_branch_as_they_are_now() {
+        let r = Repos::new("checkout");
+        let made = create(&r.path("repo"), &r.path("worktrees"), "first-name").unwrap();
+        let repo = r.path("repo").canonicalize().unwrap();
+        let c = checkout(&made.path).unwrap();
+        assert_eq!((c.repo.canonicalize().unwrap(), c.branch.as_str()), (repo.clone(), "first-name"));
+        assert!(c.worktree);
+        // Renamed in the worktree
+        r.git("worktrees/repo/first-name", &["branch", "-m", "new-name"]);
+        assert_eq!(checkout(&made.path).unwrap().branch, "new-name");
+        let c = checkout(&r.path("repo")).unwrap();
+        assert_eq!((c.repo.canonicalize().unwrap(), c.branch.as_str()), (repo, "main"));
+        assert!(!c.worktree);
+        // Detached: the commit
+        let head = r.git("repo", &["rev-parse", "--short", "HEAD"]);
+        r.git("repo", &["checkout", "-q", "--detach"]);
+        assert_eq!(checkout(&r.path("repo")).unwrap().branch, head);
+        assert_eq!(checkout(&std::env::temp_dir()), None);
     }
 
     #[test]
