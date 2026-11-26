@@ -1,6 +1,6 @@
 ---
 sources: [observed 2026-11-18/19 while testing commits 2ce9a62..2712d18, crates/nerdr/src/view.rs (NERDR_DEBUG), observed 2026-11-25 dumping Claude Code 2.1.331 in a pty]
-updated: 2026-11-25
+updated: 2026-11-26
 ---
 # Testing nerdr as an agent
 
@@ -27,6 +27,12 @@ hc server stop; rm -rf ~/.local/state/herdr-core/nerdrtest
 - `hc server status` starts the core when none is running, so checking a stopped test session brings it back. Stop it again. Observed with hc 0.1.21.
 - `hc run --bg --json "<cmd>"` prints `{"address":"t2",...}`; without `--bg` it waits like a shell.
 - `hc send <t> <text>` pastes and presses enter. Into a terminal the user is typing in, the texts merge (`clear` + `ls -la` ran as `clearls -la`), so send only to test sessions.
+
+## Comparing nerdr's screen with the core's
+
+- To check that what nerdr shows matches the core (resize, reflow): a temporary `window.resize(..)` from a timer in `Workspace::new`, then dump each view's grid rows to a file, and compare with `hc read <t>` folded to the same width. `hc read` joins soft-wrapped rows into whole lines. Read it while nerdr still runs: with no viewer left the terminal goes back to its headless 200x120. Used 2026-11-26 for the resize fix ([[hc]]).
+- The window opens small (80x26 here) and grows to maximized in ~30 steps, so every start is a series of resizes.
+- `cargo test -- --ignored connection_layer` runs the connection layer against its own core, session `nt<pid>`. The old name `nerdr-test-<pid>` made the socket path 109 bytes, over macOS's 103. It leaves its core running if it panics: `HC_SESSION=nt<pid> hc server stop`.
 
 ## A real Claude in a test session
 

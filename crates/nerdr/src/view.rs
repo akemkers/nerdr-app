@@ -714,17 +714,17 @@ impl TermSink {
 impl hc::Sink for TermSink {
     fn attached(&self, result: &serde_json::Value) {
         self.shared.ended.store(false, Ordering::Release);
-        let again = self.shared.exited.lock().unwrap().take().is_some();
-        if again {
-            // A new paint replays the screen and history: start from an empty term so
-            // the history isn't doubled.
+        if self.shared.exited.lock().unwrap().take().is_some() {
             eprintln!("nerdr: attached again on channel {}", result["channel"]);
-            let mut parser = self.parser.lock().unwrap();
-            *parser = ansi::Processor::new();
-            let mut term = self.shared.term.lock();
-            parser.advance(&mut *term, b"\x1bc");
-            term.grid_mut().clear_history();
         }
+        // Every paint replays the screen and history, also after a resize: start from an
+        // empty term so the history isn't doubled
+        let mut parser = self.parser.lock().unwrap();
+        *parser = ansi::Processor::new();
+        let mut term = self.shared.term.lock();
+        parser.advance(&mut *term, b"\x1bc");
+        term.grid_mut().clear_history();
+        drop(term);
         self.notify();
     }
 

@@ -1,6 +1,6 @@
 ---
-sources: [https://github.com/herdrdev/herdr-core, commit 6929829, commit 28b5f4a, commit c0bb232, hc schema]
-updated: 2026-11-25
+sources: [herdr-core crates/ghostty-vt/src/lib.rs (paint) and crates/herdr-core/src/viewers.rs at 329cb66, https://github.com/herdrdev/herdr-core, commit 6929829, commit 28b5f4a, commit c0bb232, hc schema]
+updated: 2026-11-26
 ---
 # hc (herdr-core)
 
@@ -29,4 +29,9 @@ updated: 2026-11-25
 
 - `display` (colors and cell size) is only taken in `terminal.attach`; no call updates it later. hc 0.1.21 `hc schema`. nerdr attaches again when the scale changes, commit 28b5f4a.
 - The paint on attach doesn't carry OSC 8: a link printed before the attach arrives as plain text. Live DATA passes OSC 8 through. Observed with hc 0.1.21, commit c0bb232. Not reported to herdr-core yet; worth an issue.
+- The paint breaks soft-wrapped rows with `\r\n`, as hard lines at the attach width: `paint` in herdr-core `crates/ghostty-vt/src/lib.rs` formats with `unwrap: false`. Seen in a trace (`NERDR_TRACE`), hc 0.1.21; unchanged in 0.1.22 and main on 2026-11-26.
+- So a viewer can't reflow the paint as the core does. After a resize the client's lines broke as 71 + 9 (the paint was at 80), while the core's were right; Claude drawing over that left letters everywhere. The user saw it after unplugging an external display, 2026-11-26.
+- A resize by a typing viewer gets no new paint. Replacement paints after a resize go only to observers that ask for them (`observe` and `resize_notifications`, `apply_size` in herdr-core `viewers.rs`), and carry no history (`first_paint(st, id, 0)`). An observer can't type or resize: the size comes from the most recently active typing viewer, else the headless 200x120.
+- The newest typing viewer leads the size: `terminal.attach` sets its `active_at` and applies its size before making the paint. Closing a viewer re-applies the size from the ones left.
+- nerdr's answer: every resize attaches again for a fresh paint at the new size (`Stream::resize` in `hc.rs`), and the old channel closes once the new one is up, so the terminal never falls back to its headless size. An attach still out when the size changes again is asked again on its reply. Rejected: a second, observer stream per pane (output twice, history stays wrong); waiting for a herdr-core change. Measured: growing the window at start is ~30 resizes and as many paints, 5.4 MB in all with 5000 lines of colored history, so no debounce. 2026-11-26.
 - The core answers kitty's `CSI ? u` itself and restores the kitty flags in the paint (`CSI = flags ; 1 u`). The client only tracks the flags. `docs/spike.md`.

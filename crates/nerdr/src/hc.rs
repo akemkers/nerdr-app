@@ -180,6 +180,12 @@ struct StreamEntry {
     /// The terminal's address from the last attach result (params may hold a name).
     address: Option<String>,
     state: StreamState,
+    /// The params of the attach that's out, to tell if the size changed meanwhile.
+    sent: Value,
+    /// While attaching again for a new size: the channel still showing, closed once
+    /// the new one is up. Until then the core keeps a typing viewer, so the terminal
+    /// never falls back to its headless size.
+    old: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -318,6 +324,8 @@ impl Client {
                     params,
                     address: None,
                     state: StreamState::Waiting,
+                    sent: Value::Null,
+                    old: None,
                 },
             );
             let send = st.connected.then(|| st.attach_request(id));
@@ -570,9 +578,27 @@ impl Client {
 
     fn on_attached(&self, sid: u64, result: Result<Value, Value>) {
         let mut detach = None;
+        let mut close = Vec::new();
         let sink = {
             let mut st = self.0.state.lock().unwrap();
             let generation = st.generation;
+            let channel = result.as_ref().ok().and_then(|r| r["channel"].as_u64()).map(|c| c as u32);
+            // The size changed while this attach was out: its paint is stale, ask again
+            if let (Some(ch), Some(e)) = (channel, st.streams.get(&sid))
+                && e.params != e.sent
+            {
+                let again = st.attach_request(sid);
+                drop(st);
+                self.write(generation, ch, kind::CLOSE, &[]);
+                if let Some((g, req)) = again {
+                    self.write(g, CONTROL, kind::DATA, &req);
+                }
+                return;
+            }
+            if let Some(old) = st.streams.get_mut(&sid).and_then(|e| e.old.take()) {
+                st.routes.remove(&old);
+                close.push(old);
+            }
             let Some(e) = st.streams.get_mut(&sid) else {
                 // Dropped while attaching: let the core go too
                 if let Ok(r) = &result
@@ -586,13 +612,12 @@ impl Client {
                 }
                 return;
             };
-            let channel = result.as_ref().ok().and_then(|r| r["channel"].as_u64());
             match (&result, channel) {
                 (Ok(r), Some(ch)) => {
-                    e.state = StreamState::Attached(ch as u32);
+                    e.state = StreamState::Attached(ch);
                     e.address = r["terminal"]["address"].as_str().map(str::to_string);
                     let sink = e.sink.clone();
-                    st.routes.insert(ch as u32, Route::Stream(sid));
+                    st.routes.insert(ch, Route::Stream(sid));
                     sink
                 }
                 _ => {
@@ -601,6 +626,10 @@ impl Client {
                 }
             }
         };
+        let generation = self.0.state.lock().unwrap().generation;
+        for ch in close {
+            self.write(generation, ch, kind::CLOSE, &[]);
+        }
         match result {
             Ok(r) if r["channel"].is_u64() => sink.attached(&r),
             Ok(r) => sink.closed(Closed::Ended(format!("attach: no channel in {r}"))),
@@ -614,6 +643,9 @@ impl Client {
             match st.routes.remove(&ch) {
                 Some(Route::Stream(id)) => st.streams.get_mut(&id).map(|e| {
                     e.state = StreamState::Ended;
+                    if e.old == Some(ch) {
+                        e.old = None;
+                    }
                     e.sink.clone()
                 }),
                 Some(Route::Events) => {
@@ -709,6 +741,7 @@ impl Client {
                 .collect();
             let mut sinks = Vec::new();
             for e in st.streams.values_mut() {
+                e.old = None;
                 if matches!(e.state, StreamState::Attached(_) | StreamState::Attaching) {
                     e.state = StreamState::Waiting;
                     sinks.push(e.sink.clone());
@@ -749,6 +782,7 @@ impl State {
         let params = {
             let e = self.streams.get_mut(&sid)?;
             e.state = StreamState::Attaching;
+            e.sent = e.params.clone();
             e.params.clone()
         };
         let id = self.take_id();
@@ -782,15 +816,30 @@ impl Stream {
         self.client.stream_frame(self.id, kind::DATA, bytes);
     }
 
-    /// Tells the core the viewer's size; it's also used for the next reattach.
+    /// A new size: attaches again, so the sink gets a fresh paint at that size. The
+    /// paint breaks wrapped lines with `\r\n`, so the viewer can't wrap the old one
+    /// again the way the core does (hc 0.1.22). One attach at a time: an attach that's
+    /// out when the size changes is asked again with the latest one.
     pub fn resize(&self, cols: u16, rows: u16) {
-        if let Some(e) = self.client.0.state.lock().unwrap().streams.get_mut(&self.id) {
+        let send = {
+            let mut st = self.client.0.state.lock().unwrap();
+            let Some(e) = st.streams.get_mut(&self.id) else {
+                return;
+            };
             e.params["cols"] = cols.into();
             e.params["rows"] = rows.into();
+            match e.state {
+                StreamState::Attached(ch) => {
+                    e.old = Some(ch);
+                    st.attach_request(self.id)
+                }
+                // Attaching sees the change on its reply; the rest use it on their next attach
+                _ => None,
+            }
+        };
+        if let Some((generation, req)) = send {
+            self.client.write(generation, CONTROL, kind::DATA, &req);
         }
-        let mut p = cols.to_le_bytes().to_vec();
-        p.extend_from_slice(&rows.to_le_bytes());
-        self.client.stream_frame(self.id, kind::RESIZE, &p);
     }
 
     pub fn focus(&self, focused: bool) {
@@ -803,15 +852,20 @@ impl Drop for Stream {
     fn drop(&mut self) {
         let detach = {
             let mut st = self.client.0.state.lock().unwrap();
-            match st.streams.remove(&self.id).map(|e| e.state) {
-                Some(StreamState::Attached(ch)) => {
-                    st.routes.remove(&ch);
-                    Some((st.generation, ch))
-                }
+            let e = st.streams.remove(&self.id);
+            let attached = match e.as_ref().map(|e| e.state) {
+                Some(StreamState::Attached(ch)) => Some(ch),
                 _ => None,
+            };
+            // An attach still out is closed on its reply
+            let chs: Vec<u32> = attached.into_iter().chain(e.and_then(|e| e.old)).collect();
+            for ch in &chs {
+                st.routes.remove(ch);
             }
+            (st.generation, chs)
         };
-        if let Some((generation, ch)) = detach {
+        let (generation, chs) = detach;
+        for ch in chs {
             self.client.write(generation, ch, kind::CLOSE, &[]);
         }
     }
@@ -921,7 +975,7 @@ mod tests {
     #[test]
     #[ignore = "starts its own hc core"]
     fn connection_layer() {
-        let session = format!("nerdr-test-{}", std::process::id());
+        let session = format!("nt{}", std::process::id());
         // SAFETY: the only test in this binary that touches the environment.
         unsafe { std::env::set_var("HC_SESSION", &session) };
         hc(&["server", "start"]);
@@ -972,6 +1026,21 @@ mod tests {
         let n = kt.len();
         std::thread::sleep(Duration::from_millis(400));
         assert_eq!(kt.len(), n, "data after detach");
+
+        // Resize: a fresh paint at the new width. The paint breaks wrapped lines with
+        // `\r\n`, so the old one can't be wrapped again on our side.
+        let long = run(&c, "printf '%0100d\\n' 0 | tr 0 q; sleep 600");
+        let (sl, kl) = attach(&c, &long);
+        let row = |n: usize| format!("{}\r\n", "q".repeat(n));
+        until("paint at 80", 5, || kl.contains(&row(80)));
+        sl.resize(40, 24);
+        // Changed again while that attach is out: only the latest size counts
+        sl.resize(50, 24);
+        until("paint at 50", 5, || kl.contains(&row(50)) && !kl.contains(&row(80)));
+        let viewers = c.call_blocking("terminal.get", json!({"terminal": long})).unwrap();
+        let t = viewers.get("terminal").unwrap_or(&viewers);
+        assert_eq!((t["cols"].as_u64(), t["rows"].as_u64()), (Some(50), Some(24)));
+        assert!(kl.closes.lock().unwrap().is_empty(), "{:?}", kl.closes.lock().unwrap());
 
         // Core restart: streams come back by themselves, calls work again
         hc(&["server", "restart"]);

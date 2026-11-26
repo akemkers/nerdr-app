@@ -59,3 +59,6 @@ jetdiff v0.3.0 as a git dep; one RepoView per task, its keys under jetdiff's key
 
 ## [2026-11-25] add | sidebar as task cards, tabs along the top (#25)
 sidebar: cards with repo and branch read from git every 2 s, the task's most urgent status and its age from hc's status_ms (missing from status events). Tabs moved to a bar over the panes.
+
+## [2026-11-26] fix | letters everywhere after a resize
+hc: the paint breaks wrapped rows with `\r\n`, so the client can't reflow it; replacement paints are for observers only. nerdr attaches again on every resize. testing: comparing nerdr's grid with `hc read`, a shorter test session name.

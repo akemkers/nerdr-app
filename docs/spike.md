@@ -109,7 +109,7 @@ ESC[H ESC[2J, tab stops, then `history` lines of scrollback and the screen as te
 cursor position, OSC 2 title, modes the program set (?2004h, ?1004h, …)
 ```
 
-The scrollback lines are printed and scroll off the top, so they land in the client's own history. A resize by an active viewer doesn't trigger a new paint (`resize_notifications: false`); the program redraws on SIGWINCH.
+The scrollback lines are printed and scroll off the top, so they land in the client's own history. A resize by an active viewer doesn't trigger a new paint (`resize_notifications: false`); the program redraws on SIGWINCH. superseded 2026-11-26: nerdr attaches again on every resize for a fresh paint, since the paint's hard line breaks can't be reflowed like the core does (wiki [[hc]]).
 
 **Queries are answered by the core.** The core runs libghostty-vt per terminal and answers DA, CPR, `OSC 10/11/12 ?` and `CSI 14t/16t` itself, using the `display` given to `terminal.run`/`terminal.attach`. They don't appear in the stream. A viewer must not answer (alacritty_terminal's `PtyWrite`/`ColorRequest` events are dropped), or the program would get two replies. Measured inside the spike's shell: `DA=\E[?62;22c`, `OSC 11 → rgb:1a1a/1b1b/2626` (our background).
 
@@ -131,7 +131,7 @@ The scrollback lines are printed and scroll off the top, so they land in the cli
 `hc::Client` (`crates/nerdr/src/hc.rs`): one socket shared by every terminal and the event feed.
 
 - `call(method, params)` returns a future. Replies are matched by id. `call_blocking` is for startup.
-- `attach(params, sink) -> Stream`. Output goes to the `Sink` on the reader thread, one call per batch, then one CREDIT per channel. `Stream` sends input, resize and focus. Dropping it detaches (CLOSE).
+- `attach(params, sink) -> Stream`. Output goes to the `Sink` on the reader thread, one call per batch, then one CREDIT per channel. `Stream` sends input and focus; a resize attaches again for a fresh paint at the new size. Dropping it detaches (CLOSE).
 - `notices()` reports Connected, Disconnected, Snapshot and Event. A new listener first gets the current state: Connected, the last snapshot and the events since it. After 1000 events the client subscribes again to get a fresh snapshot.
 - Reconnect: on EOF it fails pending calls, tells each sink `Lost`, redials with backoff from 50 ms to 2 s, then subscribes and attaches every open stream again (with its latest size). A terminal view starts from an empty term on a repaint, so the history isn't doubled. A stream closed by the core is attached again after its terminal's `restarted` event.
 - Writes carry the connection generation, so a write meant for a dropped connection never reaches the new one.
